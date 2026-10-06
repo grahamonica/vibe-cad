@@ -3,6 +3,8 @@
   "name": "vibe-cad",
   "version": "1.0.0",
   "description": "Create and edit real parametric CAD on your laptop. Sketches, dimensions, constraints, feature history, and STEP/STL export share one model with your assistant.",
+  "homepage": "https://github.com/grahamonica/vibe-cad",
+  "repository": "https://github.com/grahamonica/vibe-cad",
   "keywords": [
     "cad",
     "parametric",
@@ -17,7 +19,7 @@
       "interface": {
         "displayName": "Vibe CAD",
         "shortDescription": "A local parametric CAD workspace for you and your assistant.",
-        "longDescription": "Draw constrained sketches, create real solids, drill holes, round edges, inspect geometry, and edit dimensions. The visual editor and typed MCP tools share the same locally saved feature history. Export precise STEP files or STL meshes. ",
+        "longDescription": "Draw constrained sketches, create real solids, drill holes, round edges, inspect geometry, and edit dimensions. The visual editor and typed MCP tools share the same locally saved feature history. Export precise STEP files or STL meshes. Source: https://github.com/grahamonica/vibe-cad",
         "category": "Productivity",
         "capabilities": [
           "Read",

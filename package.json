@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "license": "MIT",
   "author": "Monica Graham",
+  "repository": "github:grahamonica/vibe-cad",
   "private": true,
   "type": "module",
   "scripts": {
