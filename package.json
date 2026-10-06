@@ -1,0 +1,42 @@
+{
+  "name": "vibe-cad",
+  "version": "1.0.0",
+  "license": "MIT",
+  "author": "Monica Graham",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && tsc --noEmit && node scripts/build-runtime.mjs",
+    "start": "sh scripts/launch.sh",
+    "test": "node --import tsx --test --test-concurrency=2 tests/*.test.ts",
+    "package:plugin": "node scripts/package-plugin.mjs",
+    "verify:plugin": "node scripts/verify-package.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^2.0.3",
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@noble/hashes": "2.4.0",
+    "lucide-react": "^1.49.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "replicad": "^1.1.0",
+    "replicad-opencascadejs": "^1.1.0",
+    "three": "^0.186.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.186.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2",
+    "vite-plugin-singlefile": "^2.3.3"
+  },
+  "engines": {
+    "node": ">=22.16.0"
+  }
+}

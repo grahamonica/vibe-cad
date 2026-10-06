@@ -1,0 +1,37 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "vibe-cad",
+  "version": "1.0.0",
+  "description": "Create and edit real parametric CAD on your laptop. Sketches, dimensions, constraints, feature history, and STEP/STL export share one model with your assistant.",
+  "keywords": [
+    "cad",
+    "parametric",
+    "engineering",
+    "3d-printing",
+    "local"
+  ],
+  "extensions": {
+    "com.openai": {
+      "mcpServers": "./mcp.json",
+      "skills": "./skills/",
+      "interface": {
+        "displayName": "Vibe CAD",
+        "shortDescription": "A local parametric CAD workspace for you and your assistant.",
+        "longDescription": "Draw constrained sketches, create real solids, drill holes, round edges, inspect geometry, and edit dimensions. The visual editor and typed MCP tools share the same locally saved feature history. Export precise STEP files or STL meshes. ",
+        "category": "Productivity",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "defaultPrompt": [
+          "Open Vibe CAD and help me design a mounting bracket.",
+          "Inspect my current CAD selection.",
+          "Change this dimension and rebuild the model."
+        ],
+        "brandColor": "#28614F",
+        "composerIcon": "./assets/icon.svg",
+        "logo": "./assets/icon.svg"
+      }
+    }
+  }
+}
