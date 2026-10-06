@@ -32,4 +32,4 @@ Optional version control works when `VIBE_WORKSPACE` points to a git checkout. D
 
 ## License
 
-Vibe CAD is released under the [MIT License](LICENSE). The geometry kernel is Open CASCADE Technology, bundled through `replicad-opencascadejs` under LGPL-2.1. It ships as the separate, replaceable `dist/kernel.wasm` so it can be rebuilt or swapped. [NOTICE.md](NOTICE.md) lists third-party licenses and links to the kernel source.
+Vibe CAD is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE) with an added permission: anyone may build, install, run and modify it for their own use for any purpose, including commercial work, and use the designs and files they create however they like. Distributing the code or work based on it, or offering it as a product or service, is limited to noncommercial purposes. The geometry kernel is Open CASCADE Technology, bundled through `replicad-opencascadejs` under LGPL-2.1. It ships as the separate, replaceable `dist/kernel.wasm` so it can be rebuilt or swapped. [NOTICE.md](NOTICE.md) lists third-party licenses and links to the kernel source.

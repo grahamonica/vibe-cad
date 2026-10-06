@@ -36,7 +36,7 @@ await writeFile(
     {
       name: "vibe-cad",
       version,
-      license: "MIT",
+      license: "SEE LICENSE IN LICENSE",
       author: "Monica Graham",
       private: true,
       type: "module",
