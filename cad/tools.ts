@@ -294,7 +294,7 @@ export function toolset(store: Store) {
     d.features.push(f);
     return f;
   };
-  add('engine_info','CAD engine version','Read the running engine version and supported fast-edit, motion and editor lifecycle capabilities.',{},true,async()=>({version:'1.1.4',capabilities:['typed-design-json','atomic-bulk-edits','motion-intent','mate-travel-limits','editor-session-close','incremental-gpu-geometry','graphics-context-recovery','lightweight-camera-selection','cached-rigid-motion','live-part-drag','live-motion-playback','placement-only-replies','live-editor-reload','bounded-view-transfer','event-driven-rendering','host-teardown-acknowledgement']}));
+  add('engine_info','CAD engine version','Read the running engine version and supported fast-edit, motion and editor lifecycle capabilities.',{},true,async()=>({version:'1.1.5',capabilities:['typed-design-json','atomic-bulk-edits','motion-intent','mate-travel-limits','editor-session-close','incremental-gpu-geometry','graphics-context-recovery','lightweight-camera-selection','cached-rigid-motion','live-part-drag','live-motion-playback','placement-only-replies','live-editor-reload','bounded-view-transfer','event-driven-rendering','host-teardown-acknowledgement']}));
   add('manage_editors','Manage open CAD editors','List renderer liveness, request close or reload of a live panel, or close other saved editors. Unsaved drafts are protected. closeRequested is not proof that the host closed a tab: closed is true only after teardown_ack. Unresponsive panels require the supplied user recovery instructions; no dead-panel host control is available. register/heartbeat/teardown_ack are renderer lifecycle operations.',
     {action:z.enum(['list','register','heartbeat','close','close_others','reload','teardown_ack','forget','resume']),sessionId:id.optional(),documentId:id.optional(),dirty:z.boolean().default(false),confirmHostClosed:z.boolean().default(false).describe('For forget only: true only after the user confirms closing that host tab with ×. Forget removes a stale registry record and never closes a tab.')},false,
     async(a,source)=>{if(a.action==='teardown_ack'&&source!=='user')throw Error('Only the renderer host teardown callback can acknowledge closure');return store.editors.update(a.action,a.sessionId,a.documentId,a.dirty,a.confirmHostClosed);});
@@ -4874,10 +4874,16 @@ Example, a plate with a hole and rounded corners: [{"tool":"create_sketch","args
         return value;
       };
       const rollBack = async () => {
+        const errors: {documentId:string; error:string}[] = [];
         for (const [docId, entry] of touched) {
-          const d = await store.read(docId).catch(() => undefined);
-          if (d) await store.restoreSnapshot(docId, d.revision, entry, 'Rolled back failed batch');
+          try {
+            const d = await store.read(docId);
+            await store.restoreSnapshot(docId, d.revision, entry, 'Rolled back failed batch');
+          } catch (error) {
+            errors.push({documentId:docId,error:error instanceof Error?error.message:String(error)});
+          }
         }
+        return errors;
       };
       for (const [index, step] of a.steps.entries()) {
         const tool = tools.find((t) => t.name === step.tool);
@@ -4915,12 +4921,13 @@ Example, a plate with a hole and rounded corners: [{"tool":"create_sketch","args
           const message = e instanceof Error ? e.message : String(e);
           results.push({ step: index + 1, tool: step.tool, ...(step.as ? { as: step.as } : {}), ok: false, error: message });
           const interrupted = e instanceof BuildInterrupted || (managed && store.buildControl.status().state === 'stopping');
-          if (a.atomic && !interrupted) await rollBack();
+          const rollbackErrors = a.atomic && !interrupted ? await rollBack() : [];
           return {
             ok: false,
             failedStep: index + 1,
             error: `Step ${index + 1} (${step.tool}): ${message}`,
-            rolledBack: a.atomic && !interrupted,
+            rolledBack: a.atomic && !interrupted && !rollbackErrors.length,
+            ...(rollbackErrors.length ? {rollbackErrors,recoveryInstructions:'Some documents could not be rolled back. Inspect their current revisions before continuing; completed steps may remain saved.'} : {}),
             ...(interrupted ? { interrupted: true } : {}),
             steps: results,
             ...(created.length ? { createdDocuments: created } : {}),

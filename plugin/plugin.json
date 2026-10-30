@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "vibe-cad",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Create and edit real parametric CAD on your laptop. Sketches, dimensions, constraints, feature history, and STEP/STL export share one model with your assistant.",
   "homepage": "https://github.com/grahamonica/vibe-cad",
   "repository": "https://github.com/grahamonica/vibe-cad",

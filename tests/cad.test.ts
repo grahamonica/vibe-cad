@@ -135,6 +135,7 @@ test("precise plate, holes, counterbore, parametric edits, stable selection, exp
 });
 test("fillets/chamfers use kernel and invalid features leave committed document intact", async () => {
   let v = await plate();
+  assert.equal(v.geometry.bodies[0].tangentEdges?.length ?? 0, 0);
   const body = v.document.bodies[0].id;
   v = await call(
     "fillet_edges",
@@ -142,6 +143,7 @@ test("fillets/chamfers use kernel and invalid features leave committed document 
     v,
   );
   assert.ok(v.geometry.bodies[0].volume < 48000);
+  assert.equal(v.geometry.bodies[0].tangentEdges?.length, 8, 'four vertical fillets have two tangent boundaries each');
   assert.ok(
     v.geometry.bodies[0].topology.some((t) => t.geomType === "CYLINDRE"),
   );

@@ -1,12 +1,20 @@
 # Vibe CAD 1.1
 
+## 1.1.5 spline boundary evaluation
+
+The detailed forest/tab failure was reproduced on the same Node 24.19.0 runtime as the live plugin, after loading the saved 47-document assembly. The joined solid and its meshes completed. Tangent-edge classification then exhausted the WebAssembly heap at 4,294,901,760 bytes; the kernel abort surfaced as a stack overflow. Rollback attempted to reuse that state and its null-shape/WebAssembly error replaced the original failure. Isolated forest-only replays did not expose this memory threshold.
+
+Tangent-edge normals now use each edge's existing face-boundary curve and UV coordinates through BRepGProp_Face, instead of repeatedly solving 3D point-to-spline-surface projections. All evaluator, UV point, 3D point and normal temporaries are explicitly released in finally. This removes redundant work and deferred native allocations, while retaining the same solid, detailed artwork and tangent-edge behavior. No retry expansion, worker cycling or new dependencies were added. The identical assembly/forest/tab sequence then completed in one worker without retries; the final solid volume was 12,987.160297563609 mm³. Intermediate heap growth stabilized around 868 MB rather than reaching 4 GB. A focused existing fillet check still identifies its eight tangent boundaries and keeps sharp box edges sharp.
+
+A failed batch now preserves its original step error if rollback also fails, lists rollback errors per document, and reports rolledBack:false instead of losing the primary error. Two focused checks passed in 1.3 seconds; no broad benchmark or new test suite was added. The saved user models were read only during diagnosis. Native activation still requires a restart; this finding does not certify every host renderer crash.
+
 ## 1.1.4 installation lifetime
 
 The launcher gives each running stdio process one immutable copy of its runtime bundles, editor HTML and WASM kernel. Plugin upgrades can then remove an older installation without breaking a live session's resource reads, delayed worker startup or inherited working directory. Assets are removed on process exit; orphaned runtime snapshots are removed on the next launch. Saved CAD documents are never copied into this runtime directory. No dependencies or network services were added.
 
 This addresses confirmed host logs repeatedly reading a deleted 1.1.1 editor HTML path after installation of a newer plugin. Standalone verification now removes the disposable extracted installation while its process is running, before its first geometry operation, and verifies geometry, STEP export, editor resources and cleanup. This is a packaging lifetime fix, not proof that all renderer crashes or geometry failures are fixed.
 
-The proposed broader automatic WebAssembly retry and unrelated rollback changes were removed. The isolated forest, mounting-tab join, original assembly followed by forest edits, and forced-garbage-collection sequence all passed without retries; the long-session native kernel failure has not yet been reproduced or attributed to a specific source change.
+The proposed broader automatic WebAssembly retry and unrelated rollback changes were removed. The isolated forest, mounting-tab join, original assembly followed by forest edits, and forced-garbage-collection sequence all passed without retries; the long-session native kernel failure was not reproduced at that checkpoint; the matching-runtime assembly replay described in 1.1.5 subsequently identified it.
 
 Native 1.1.3 opened the saved Yosemite assembly and played/paused its live 24-hour controls; Stop restored the saved pose. Native verification of the new launcher requires one activation restart.
 

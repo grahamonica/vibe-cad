@@ -65,7 +65,7 @@ export async function reloadEditor(discardUnsaved=false){if(discardUnsaved){draf
 export async function initialize() {
   if (ready) return ready;
   app = new App(
-    { name: "Vibe CAD", version: "1.1.4" },
+    { name: "Vibe CAD", version: "1.1.5" },
     { availableDisplayModes: ["inline", "fullscreen"] },
     { autoResize: false },
   );

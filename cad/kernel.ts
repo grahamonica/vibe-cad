@@ -1704,9 +1704,11 @@ function tangentEdgeIds(shape: r.Shape3D, topology: ReturnType<typeof topologies
   for (const edge of shape.edges) {
     const pair = faces.get(edge.hashCode);
     if (hidden.has(edge.hashCode) || pair?.length !== 2) continue;
-    const p = edge.pointAt(0.5).toTuple();
     try {
-      const [n1, n2] = pair.map((f) => unit(f.normalAt(p).toTuple()));
+      // The edge already has a parametric curve on each adjacent face. A 3D
+      // nearest-point projection here is redundant, especially expensive on
+      // spline surfaces, and leaves large native temporaries waiting for JS GC.
+      const [n1, n2] = pair.map((face) => boundaryNormal(face, edge));
       const id = topology.hashes.get(edge.hashCode);
       if (id && dot(n1, n2) > Math.cos(Math.PI / 180)) out.push(id);
     } catch {
@@ -1714,6 +1716,20 @@ function tangentEdgeIds(shape: r.Shape3D, topology: ReturnType<typeof topologies
     }
   }
   return out;
+}
+function boundaryNormal(face: r.Face, edge: r.Edge): Vec3 {
+  const oc = r.getOC() as any;
+  const evaluator = new oc.BRepGProp_Face(face.wrapped, false);
+  const point = new oc.gp_Pnt(), normal = new oc.gp_Vec();
+  let uv: any;
+  try {
+    if (!evaluator.Load(edge.wrapped)) throw Error('Edge has no curve on its face');
+    uv = evaluator.Value2d((evaluator.FirstParameter() + evaluator.LastParameter()) / 2);
+    evaluator.Normal(uv.X(), uv.Y(), point, normal);
+    return unit([normal.X(), normal.Y(), normal.Z()]);
+  } finally {
+    uv?.delete(); normal.delete(); point.delete(); evaluator.delete();
+  }
 }
 /**
  * Edges between two faces of one surface: a cylinder or plane split in two

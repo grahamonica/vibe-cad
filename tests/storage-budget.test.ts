@@ -50,3 +50,13 @@ test('linked-part edits refresh an assembly state without a dummy root edit',asy
  assert.equal(after.revision,before.revision);assert.notEqual(after.dependencyKey,before.dependencyKey);
  assert.equal((await s.view(await s.read(root.document.id))).geometry.dependencyKey,after.dependencyKey);
 });
+test('a rollback failure does not replace the original operation error',async()=>{
+ const p=new Memory(),s=new DocumentStore(p,geometry),root=await s.create('root');
+ s.restoreSnapshot=async()=>{throw Error('kernel unavailable during rollback');};
+ const tool=toolset(s).find(t=>t.name==='run_steps')!;
+ const r=await tool.handler(tool.schema.parse({documentId:root.document.id,steps:[{tool:'set_variable',args:{name:'width',expression:'360'}},{tool:'no_such_tool',args:{}}]}),'assistant');
+ assert.equal(r.ok,false);assert.equal(r.rolledBack,false);assert.match(r.error,/no_such_tool/);
+ assert.deepEqual(r.rollbackErrors,[{documentId:root.document.id,error:'kernel unavailable during rollback'}]);
+ assert.equal((await s.read(root.document.id)).variables?.[0].value,360);
+ assert.equal(s.buildControl.status().state,'idle');
+});
