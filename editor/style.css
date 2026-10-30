@@ -357,6 +357,9 @@ input[type="range"] {
 }
 
 /* Viewport ---------------------------------------------------------------- */
+.editor-recovery { padding: 32px; max-width: 620px; margin: auto; }
+.editor-recovery h1 { font-size: 20px; }
+.viewport-recovery { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; background: #ffffffed; z-index: 20; text-align: center; }
 .viewport-host {
   position: absolute;
   inset: 0;
@@ -366,6 +369,7 @@ input[type="range"] {
   display: block;
   touch-action: none;
 }
+.viewport-canvas { position: absolute; inset: 0; }
 .viewport-error {
   position: absolute;
   top: 40%;

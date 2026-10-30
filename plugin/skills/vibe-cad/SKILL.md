@@ -39,7 +39,7 @@ View convention: Y is up, Front is XY viewed from +Z, Top is XZ viewed from +Y. 
 
 ## Fast edits and sculpted artwork
 
-Start with `engine_info` after a plugin update; the running version must be 1.1.0 or later before relying on these tools. An installed package does not update an already running stdio process.
+Start with `engine_info` after a plugin update; the running version must be 1.1.1 or later before relying on graphics recovery. An installed package does not update an already running stdio process. A gray sad-face panel is a host renderer crash, not a normal CAD validation error. Do not keep opening replacement panels. Check the active runtime, retire unused editors, and verify recovery in the native host; a browser-only test cannot prove a host crash is fixed.
 
 Use `inspect_design` for lightweight authoritative JSON: sketches, dimensions, variables, features, placements and mates, without meshes, imported bytes or undo copies. Request current linked designs only when useful. Use `edit_design` to replace an existing sketch or change many numeric parameters/variables/poses atomically with one solve/rebuild. Feature IDs remain stable; invalid edits preserve the previous revision. Use ordinary typed tools to create features and actual geometry selectors to pick topology. Never edit saved CAD files through a shell.
 

@@ -41,7 +41,7 @@ export async function closeOtherEditors(){await editorRegistry('close_others');}
 export async function initialize() {
   if (ready) return ready;
   app = new App(
-    { name: "Vibe CAD", version: "1.1.0" },
+    { name: "Vibe CAD", version: "1.1.1" },
     { availableDisplayModes: ["inline", "fullscreen"] },
     { autoResize: false },
   );

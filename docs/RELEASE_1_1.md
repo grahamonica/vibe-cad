@@ -1,5 +1,11 @@
 # Vibe CAD 1.1
 
+## 1.1.1 graphics recovery
+
+Streaming an assembly now retains GPU buffers for unchanged bodies instead of rebuilding every previously received body for each chunk. Framebuffer dimensions and estimated geometry allocations are bounded before upload. Closing a scene releases the environment render target, triad textures, section materials, and graphics context. A lost WebGL context gets one automatic recreation; repeated failures offer a Restore action without discarding the current editor document. React errors have a reload screen.
+
+The observed native host log records a sandbox renderer process crash (reason `crashed`, exit code 5); it does not establish an out-of-memory cause. An entire host process crash cannot be intercepted by an in-process React boundary or WebGL handler. Browser fault-injection checks are separate from native-host verification after restart.
+
 Saved documents remain authoritative for the editor and tools. This update adds typed bulk JSON edits and dry-run validation, intended motion declarations, signed linear/angular travel limits, and live drag projection through existing mates. A motion declaration checks the expected remaining freedom; it never replaces missing mates.
 
 Artwork sketches may capture fixed profiles within a bounded geometry budget. Functional interfaces should retain dimensions and relations. Bulk edits preserve feature IDs, validate the candidate, and commit one revision only after a successful rebuild. Structure-only validation cannot certify assembly mates; geometry validation rebuilds the candidate without saving it.

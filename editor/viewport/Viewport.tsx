@@ -60,7 +60,9 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
     propsRef = useRef(props),
     sketchLines = useRef<{ id: string; segments: [THREE.Vector3, THREE.Vector3][]; construction: string[] }[]>([]),
     regionsRef = useRef<{ seed: Vec2; polygon: Vec2[]; holes: Vec2[][] }[]>([]),
-    [failed, setFailed] = useState(false);
+    [failed, setFailed] = useState(''),
+    [sceneEpoch, setSceneEpoch] = useState(0),
+    autoRecoveries = useRef(0);
   propsRef.current = props;
   useImperativeHandle(handle, () => ({
     orient: (o) => sceneRef.current?.orient(o),
@@ -71,14 +73,31 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
   // Scene lifetime.
   useEffect(() => {
     if (!host.current) return;
+    let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
     let scene: CadScene;
     try {
       scene = new CadScene(host.current);
     } catch {
-      setFailed(true);
+      setFailed('The 3D view could not start. Your saved model is unchanged.');
       return;
     }
     sceneRef.current = scene;
+    restored.current = null;
+    const releaseScene = () => {
+      sessionRef.current?.dispose();sessionRef.current=undefined;
+      scene.dispose();
+      if(sceneRef.current===scene)sceneRef.current=null;
+    };
+    scene.onRenderError = () => { releaseScene(); setFailed('The 3D view paused. Restore it to try again; your saved model is unchanged.'); };
+    scene.onContextLost = () => {
+      releaseScene();
+      setFailed('The 3D view paused. Restoring your model…');
+      if (autoRecoveries.current++ === 0) recoveryTimer = setTimeout(() => {
+        setFailed('');
+        setSceneEpoch(n => n + 1);
+      }, 300);
+      else setFailed('The 3D view paused to release graphics resources. Your saved model is unchanged.');
+    };
     scene.onCameraChange = (position, target, up, zoom) => propsRef.current.onCamera(position, target, up, zoom);
     scene.onComponentDrag = (id, delta, rotation) => propsRef.current.onComponentDrag?.(id, delta, rotation);
     const canvas = scene.renderer.domElement;
@@ -205,6 +224,7 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
     window.addEventListener("keydown", alt);
     window.addEventListener("keyup", alt);
     return () => {
+      clearTimeout(recoveryTimer);
       window.removeEventListener("keydown", alt);
       window.removeEventListener("keyup", alt);
       sessionRef.current?.dispose();
@@ -212,12 +232,12 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
       scene.dispose();
       sceneRef.current = null;
     };
-  }, []);
+  }, [sceneEpoch]);
   // Bodies and previews.
   // Streamed bodies arrive at one pinned revision; refresh the scene as they arrive.
   const geometryKey = props.view ? `${props.view.document.id}:${props.view.document.revision}:${props.view.geometry.dependencyKey ?? ''}:${props.view.geometry.bodies.length}` : "none";
   useEffect(() => {
-    sceneRef.current?.setGeometry(props.view, {
+    try { sceneRef.current?.setGeometry(props.view, {
       ghost: props.ghost,
       solidPreview: props.solidPreview,
       fadeBodies: props.fadeBodies,
@@ -228,17 +248,21 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
     sceneRef.current?.setExplode(props.explode ?? 0, props.explodeOffsets);
     if (props.gizmo) sceneRef.current?.attachGizmo(props.gizmo.componentId, props.gizmo.bodyIds, props.gizmo.position, props.gizmo.mode, props.gizmo.axis);
     sceneRef.current?.setSelection(props.highlight.refs, props.highlight.planes);
-  }, [geometryKey, props.ghost, props.solidPreview, props.fadeBodies, JSON.stringify(props.gizmo), [...(props.hiddenBodies ?? [])].join(), props.tangentEdges, props.displayStyle]);
+    } catch (error) {
+      sceneRef.current?.dispose();sceneRef.current=null;
+      setFailed(error instanceof Error ? error.message : 'The 3D view could not be displayed.');
+    }
+  }, [sceneEpoch, geometryKey, props.ghost, props.solidPreview, props.fadeBodies, JSON.stringify(props.gizmo), [...(props.hiddenBodies ?? [])].join(), props.tangentEdges, props.displayStyle]);
   // Exploding only moves bodies.
   useEffect(() => {
     sceneRef.current?.setExplode(props.explode ?? 0, props.explodeOffsets);
-  }, [props.explode, JSON.stringify(props.explodeOffsets)]);
+  }, [sceneEpoch, props.explode, JSON.stringify(props.explodeOffsets)]);
   useEffect(() => {
     sceneRef.current?.setSection(props.section ?? null);
-  }, [JSON.stringify(props.section ?? null)]);
+  }, [sceneEpoch, JSON.stringify(props.section ?? null)]);
   useEffect(() => {
     sceneRef.current?.setSelection(props.highlight.refs, props.highlight.planes);
-  }, [JSON.stringify(props.highlight)]);
+  }, [sceneEpoch, JSON.stringify(props.highlight)]);
   // Restore the saved camera once per document.
   const restored = useRef<string | null>(null);
   useEffect(() => {
@@ -252,7 +276,7 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
     // Refit after the streamed assembly settles, rather than centering permanently on its first body.
     const timer = setTimeout(() => scene.orient(v.document.viewport ? 'fit' : 'iso', false), 300);
     return () => clearTimeout(timer);
-  }, [props.view?.document.id, props.view?.geometry.bodies.length]);
+  }, [sceneEpoch, props.view?.document.id, props.view?.geometry.bodies.length]);
   // Datum planes.
   const planeKey = JSON.stringify(props.planes);
   useEffect(() => {
@@ -261,7 +285,7 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
     const span = props.view?.geometry.bodies.reduce((m, b) => Math.max(m, ...b.bounds[1].map((v, i) => Math.abs(v - b.bounds[0][i]))), 0) ?? 0;
     const size = Math.max(60, span * 1.25);
     scene.setPlanes(props.planes.map((p) => ({ ...p, size })));
-  }, [planeKey, geometryKey]);
+  }, [sceneEpoch, planeKey, geometryKey]);
   // Visible (not edited) sketches and profile regions.
   const sketchKey = JSON.stringify([props.sketches.map((s) => [s.sketch, s.frame]), props.profile, props.editing?.sketch.id]);
   useEffect(() => {
@@ -328,7 +352,7 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
       }
     }
     scene.invalidate();
-  }, [sketchKey]);
+  }, [sceneEpoch, sketchKey]);
   // Sketch editing session.
   const editingId = props.editing?.sketch.id;
   useEffect(() => {
@@ -350,16 +374,19 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
       session.dispose();
       if (sessionRef.current === session) sessionRef.current = undefined;
     };
-  }, [editingId]);
+  }, [sceneEpoch, editingId]);
   useEffect(() => {
     if (props.editing && sessionRef.current) sessionRef.current.update(props.editing.sketch, props.editing.frame);
-  }, [JSON.stringify(props.editing?.sketch), JSON.stringify(props.editing?.frame)]);
+  }, [sceneEpoch, JSON.stringify(props.editing?.sketch), JSON.stringify(props.editing?.frame)]);
   useEffect(() => {
     if (sessionRef.current && sessionRef.current.tool !== props.sketchTool) sessionRef.current.setTool(props.sketchTool);
-  }, [props.sketchTool]);
+  }, [sceneEpoch, props.sketchTool]);
   return (
-    <div className="viewport-host" ref={host} aria-label="3D CAD viewport" tabIndex={-1}>
-      {failed && <p className="viewport-error">WebGL is unavailable. Enable hardware acceleration to use the 3D viewport.</p>}
+    <div className="viewport-host" aria-label="3D CAD viewport" tabIndex={-1}>
+      <div className="viewport-canvas" ref={host} />
+      {failed && <div className="viewport-recovery" role="status"><p>{failed}</p>
+        <button className="primary" onClick={() => { autoRecoveries.current = 0; setFailed(''); setSceneEpoch(n => n + 1); }}>Restore 3D view</button>
+      </div>}
     </div>
   );
 });

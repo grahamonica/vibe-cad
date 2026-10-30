@@ -22,6 +22,7 @@ import type {
 import { textureInfo } from "../../cad/appearance.ts";
 import { textureCanvases } from "./textures.ts";
 import { prepareDrag } from '../../cad/drag-motion.ts';
+import { assertRenderBudget, renderPixelRatio } from './render-budget.ts';
 import { freeOrbit } from './camera-math.ts';
 import { cameraFor } from '../../cad/drawing.ts';
 
@@ -74,6 +75,7 @@ const upFor = (dir: THREE.Vector3) =>
   Math.abs(dir.y) > 0.999 ? new THREE.Vector3(0, 0, dir.y > 0 ? -1 : 1) : new THREE.Vector3(0, 1, 0);
 
 interface BodyRecord {
+  displayKey?: string;
   body: RenderBody;
   mesh: THREE.Mesh;
   edges: LineSegments2;
@@ -122,7 +124,7 @@ export class CadScene {
   readonly sectionGroup = new THREE.Group();
   private section: THREE.Plane | null = null;
   private bodies = new Map<string, BodyRecord>();
-  private materials: THREE.Material[] = [];
+  private environmentTarget?: THREE.WebGLRenderTarget;
   private lineMaterials = new Set<LineMaterial>();
   /** Dashed hidden lines: dashes are kept a fixed number of pixels long. */
   private dashMaterials = new Set<LineMaterial>();
@@ -142,20 +144,32 @@ export class CadScene {
   private labelUpdaters = new Set<() => void>();
   onCameraChange?: (position: Vec3, target: Vec3, up: Vec3, zoom: number) => void;
   onComponentDrag?: (componentId: string, delta: Vec3, rotation: [number, number, number, number]) => void;
+  onContextLost?: () => void;
+  onRenderError?: (error: unknown) => void;
   constructor(readonly host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, stencil: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(1);
     this.renderer.setClearColor(palette.white);
     this.renderer.autoClear = false;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     host.appendChild(this.renderer.domElement);
+    const lost = (event: Event) => {
+      event.preventDefault();
+      cancelAnimationFrame(this.frame);
+      this.onContextLost?.();
+    };
+    this.renderer.domElement.addEventListener('webglcontextlost', lost);
+    this.disposeHooks.push(() => this.renderer.domElement.removeEventListener('webglcontextlost', lost));
     this.overlay = document.createElement("div");
     this.overlay.className = "viewport-labels";
     host.appendChild(this.overlay);
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    const room = new RoomEnvironment();
+    this.environmentTarget = pmrem.fromScene(room, 0.04);
+    this.scene.environment = this.environmentTarget.texture;
     this.scene.environmentIntensity = 0.32;
     pmrem.dispose();
+    room.dispose();
     this.camera = new THREE.OrthographicCamera(-50, 50, 50, -50, -100000, 100000);
     this.camera.up.set(0, 1, 0);
     this.camera.position.set(200, 200, 200);
@@ -220,7 +234,8 @@ export class CadScene {
     const loop = () => {
       if (this.disposed) return;
       this.frame = requestAnimationFrame(loop);
-      this.step();
+      try { this.step(); }
+      catch (error) { cancelAnimationFrame(this.frame); this.onRenderError?.(error); }
     };
     loop();
     this.disposeHooks.push(() => resize.disconnect());
@@ -263,6 +278,7 @@ export class CadScene {
   private resize() {
     const rect = this.host.getBoundingClientRect();
     this.size = { width: Math.max(1, rect.width), height: Math.max(1, rect.height) };
+    this.renderer.setPixelRatio(renderPixelRatio(this.size.width, this.size.height, window.devicePixelRatio));
     this.renderer.setSize(this.size.width, this.size.height);
     const aspect = this.size.width / this.size.height,
       h = 100;
@@ -524,22 +540,33 @@ export class CadScene {
     const selected = new THREE.MeshStandardMaterial({ color: palette.accent, roughness: 0.8, metalness: 0, ...marked });
     const hovered = new THREE.MeshStandardMaterial({ color: palette.slate, roughness: 0.8, metalness: 0, ...marked });
     const list = [base, selected, hovered];
-    this.materials.push(...list);
     return list;
   }
   // -------------------------------------------------------------------------
   // Bodies
   private clearGroup(group: THREE.Group) {
     for (const child of [...group.children]) {
-      child.traverse((o: any) => {
-        o.geometry?.dispose?.();
-        const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
-        for (const m of mats) {
-          if (m instanceof LineMaterial) this.releaseLineMaterial(m);
-          else m.dispose?.();
-        }
-      });
-      group.remove(child);
+      this.disposeObject(child);
+    }
+  }
+  private disposeObject(child: THREE.Object3D) {
+    child.traverse((o: any) => {
+      o.geometry?.dispose?.();
+      const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+      for (const m of mats) {
+        if (m instanceof LineMaterial) this.releaseLineMaterial(m);
+        else m.dispose?.();
+      }
+    });
+    child.removeFromParent();
+  }
+  private clearSection() {
+    // Stencil passes share geometry with bodies. Dispose only what they own.
+    for (const child of [...this.sectionGroup.children]) {
+      const mesh = child as THREE.Mesh;
+      (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).forEach(m => m.dispose());
+      if (child.userData.ownGeometry) mesh.geometry.dispose();
+      child.removeFromParent();
     }
   }
   /**
@@ -563,12 +590,7 @@ export class CadScene {
     }
     this.ghostGroup.traverse((o: any) => (Array.isArray(o.material) ? o.material.forEach(clip) : o.material && clip(o.material)));
     // Stencil passes share the body geometry; only materials and the cap are owned here.
-    for (const child of [...this.sectionGroup.children]) {
-      const m = (child as THREE.Mesh).material as THREE.Material;
-      m.dispose();
-      if (child.userData.ownGeometry) (child as THREE.Mesh).geometry.dispose();
-      this.sectionGroup.remove(child);
-    }
+    this.clearSection();
     if (this.section) {
       const box = new THREE.Box3();
       for (const r of this.bodies.values()) {
@@ -650,35 +672,41 @@ export class CadScene {
     this.invalidate();
   }
   setGeometry(view: View | null, options: SceneOptions = {}) {
-    this.transform.detach();this.resetDrag();this.currentView=view??undefined;
+    const visible = view?.geometry.bodies.filter(b => !b.hidden && !options.hiddenBodies?.has(b.id)) ?? [];
+    assertRenderBudget([...visible, ...(options.ghost?.bodies ?? [])]);
+    const wrapper = this.transform.object;
+    this.transform.detach();wrapper?.removeFromParent();this.resetDrag();this.currentView=view??undefined;
     this.clearGroup(this.explodeGroup);
-    this.clearGroup(this.bodiesGroup);
+    this.clearSection();
     this.clearGroup(this.ghostGroup);
-    this.bodies.clear();
-    this.materials = [];
+    const keep = new Set(visible.map(b => b.id));
+    for (const [id, record] of this.bodies) if (!keep.has(id)) {
+      for (const o of recordObjects(record)) this.disposeObject(o);
+      this.bodies.delete(id);
+    }
     if (!view) {
       this.invalidate();
       return;
     }
     const previewIds = new Set(options.ghost?.bodies.map((b) => b.id) ?? []);
     const solidPreview = !!(options.solidPreview && options.ghost);
-    for (const body of view.geometry.bodies) {
-      if (body.hidden || options.hiddenBodies?.has(body.id)) continue;
+    for (const body of visible) {
       const replaced = solidPreview && previewIds.has(body.id);
+      const displayKey = JSON.stringify([options.fadeBodies, !!options.ghost, replaced, options.displayStyle, options.tangentEdges, options.explode, options.explodeOffsets?.[body.id]]);
+      const previous = this.bodies.get(body.id);
+      // Streamed partial views share unchanged body objects. Keep their GPU buffers.
+      if (previous?.body === body && previous.displayKey === displayKey) continue;
+      if (previous) for (const o of recordObjects(previous)) this.disposeObject(o);
       const record = this.buildBody(body, {
         opacity: options.fadeBodies ? 0.35 : options.ghost && !solidPreview ? 0.35 : (body.opacity ?? 1),
         style: options.displayStyle,
         hideTangent: options.tangentEdges === false,
         offset: new THREE.Vector3(...(options.explodeOffsets?.[body.id] ?? [0, 0, 0])).multiplyScalar(options.explode ?? 0),
       });
+      record.displayKey = displayKey;
       if (replaced) {
         // Hidden but still pickable, so selections refer to committed topology.
-        record.mesh.material = (record.mesh.material as THREE.Material[]).map((m) => {
-          const clone = m.clone();
-          clone.visible = false;
-          this.materials.push(clone);
-          return clone;
-        });
+        (record.mesh.material as THREE.Material[]).forEach(m => { m.visible = false; });
         record.mesh.userData.pickOnly = true;
         for (const o of recordObjects(record).slice(1)) o.visible = false;
       }
@@ -732,7 +760,7 @@ export class CadScene {
     if(!texture) body.mesh.faceGroups.forEach((g,i)=>{
       if(!g.color)return;
       let index=faceMaterials.get(g.color);
-      if(index===undefined){index=mats.length;mats.push(this.faceMaterials(g.color,o.opacity,style)[0]);faceMaterials.set(g.color,index);}
+      if(index===undefined){index=mats.length;const [base,selected,hovered]=this.faceMaterials(g.color,o.opacity,style);selected.dispose();hovered.dispose();mats.push(base);faceMaterials.set(g.color,index);}
       geo.groups[i].materialIndex=index;
     });
     const baseMaterials=geo.groups.map(g=>g.materialIndex ?? 0);
@@ -934,7 +962,8 @@ export class CadScene {
   }
   /** Attach the translate gizmo to a body's displayed position (assembly component moves). */
   attachGizmo(componentId: string, bodyIds: string[], position: Vec3, mode: 'translate' | 'rotate' = 'translate', axis?: Vec3) {
-    this.transform.detach();this.resetDrag();
+    const old = this.transform.object;
+    this.transform.detach();old?.removeFromParent();this.resetDrag();
     if(!bodyIds.some(id=>this.bodies.has(id)))return;
     this.dragMotion=this.currentView&&prepareDrag(this.currentView,componentId);
     const origin=this.dragMotion?.initial[componentId]?.position??position;
@@ -1140,22 +1169,35 @@ export class CadScene {
   }
   // -------------------------------------------------------------------------
   dispose() {
+    if (this.disposed) return;
     this.disposed = true;
     cancelAnimationFrame(this.frame);
     for (const h of this.disposeHooks) h();
     this.transform.dispose();
     this.controls.dispose();
+    this.clearSection();
     this.clearGroup(this.bodiesGroup);
     this.clearGroup(this.ghostGroup);
     this.clearGroup(this.planeGroup);
     this.clearGroup(this.sketchGroup);
     this.clearGroup(this.sketchLayer);
+    this.clearGroup(this.explodeGroup);
+    this.clearGroup(this.helperGroup);
+    this.bodies.clear();
+    this.currentView=undefined;
+    this.dragMatrices.clear();this.dragMotion=undefined;
+    this.labelUpdaters.clear();
     this.cube.dispose();
+    this.triad.dispose();
     for (const maps of this.textures.values()) {
       maps.color.dispose();
       maps.height?.dispose();
     }
+    this.textures.clear();
+    this.scene.environment = null;
+    this.environmentTarget?.dispose();
     this.renderer.dispose();
+    if (!this.renderer.getContext().isContextLost()) this.renderer.forceContextLoss();
     this.renderer.domElement.remove();
     this.overlay.remove();
   }
@@ -1334,5 +1376,15 @@ class Triad {
     renderer.render(this.scene, this.camera);
     renderer.setScissorTest(false);
     void size;
+  }
+  dispose() {
+    this.scene.traverse((o: any) => {
+      o.geometry?.dispose?.();
+      for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+        m?.map?.dispose();
+        m?.dispose?.();
+      }
+    });
+    this.scene.clear();
   }
 }
