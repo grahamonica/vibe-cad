@@ -1,5 +1,15 @@
 # Vibe CAD 1.1
 
+## 1.1.4 installation lifetime
+
+The launcher gives each running stdio process one immutable copy of its runtime bundles, editor HTML and WASM kernel. Plugin upgrades can then remove an older installation without breaking a live session's resource reads, delayed worker startup or inherited working directory. Assets are removed on process exit; orphaned runtime snapshots are removed on the next launch. Saved CAD documents are never copied into this runtime directory. No dependencies or network services were added.
+
+This addresses confirmed host logs repeatedly reading a deleted 1.1.1 editor HTML path after installation of a newer plugin. Standalone verification now removes the disposable extracted installation while its process is running, before its first geometry operation, and verifies geometry, STEP export, editor resources and cleanup. This is a packaging lifetime fix, not proof that all renderer crashes or geometry failures are fixed.
+
+The proposed broader automatic WebAssembly retry and unrelated rollback changes were removed. The isolated forest, mounting-tab join, original assembly followed by forest edits, and forced-garbage-collection sequence all passed without retries; the long-session native kernel failure has not yet been reproduced or attributed to a specific source change.
+
+Native 1.1.3 opened the saved Yosemite assembly and played/paused its live 24-hour controls; Stop restored the saved pose. Native verification of the new launcher requires one activation restart.
+
 ## 1.1.3 live assembly motion and bounded recovery
 
 Rigid component moves now solve current mates against cached topology and re-place only affected bodies; solid features are not rebuilt. Placement-only replies and polling retain cached shapes and stationary GPU buffers. Continuous dragging and playback update object matrices locally, with no tools, mesh transfers or revisions per frame. A drag commits once on release. Selecting an attached member resolves its rigid driving part; ordinary geared followers can also drive their mate relation. Linear and rotary travel limits remain active. Evaluate > Motion adds play/pause, stop, scrubbing and a configurable cycle duration. Collision/clearance booleans are explicitly requested, not launched automatically as fields change. Shape-changing belts/in-context sketches retain their required geometry evaluation and are excluded from rigid playback.

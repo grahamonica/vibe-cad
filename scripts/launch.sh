@@ -21,4 +21,4 @@ if [ ! -f "$vibe_root/dist/runtime/stdio.mjs" ] || [ ! -f "$vibe_root/dist/edito
   printf '%s\n' 'Vibe CAD is missing its bundled tools. Rebuild or reinstall the plugin.' >&2
   exit 1
 fi
-exec "$vibe_node" "$vibe_root/dist/runtime/stdio.mjs"
+exec "$vibe_node" "$vibe_root/scripts/start-runtime.mjs"

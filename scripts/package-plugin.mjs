@@ -8,6 +8,7 @@ for (const path of ["plugin.json", "mcp.json", "assets", "skills"])
   await cp(`plugin/${path}`, `${stage}/${path}`, { recursive: true });
 for (const path of [
   "scripts/launch.sh",
+  "scripts/start-runtime.mjs",
   "README.md",
   "NOTICE.md",
   "LICENSE",

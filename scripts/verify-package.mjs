@@ -1,4 +1,4 @@
-import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -31,6 +31,7 @@ const transport = new StdioClientTransport({
     PATH: "/usr/bin:/bin",
     CODEX_MCP_NODE_PATH: process.env.CODEX_MCP_NODE_PATH ?? process.execPath,
     VIBE_CAD_DATA_DIR: join(temp, "models", "documents"),
+    TMPDIR: temp,
   },
   stderr: "pipe",
 });
@@ -48,12 +49,15 @@ try {
   for (const name of ["create_document", "open_cad", "run_steps"]) {
     const tool = catalog.find((x) => x.name === name);
     assert.ok(visibleTools.some(t => t.name === name), `${name} must reach the model`);
-    assert.equal(tool._meta.ui.resourceUri, name === "open_cad" ? "ui://vibe-cad/editor-1.1.3.html" : undefined);
+    assert.equal(tool._meta.ui.resourceUri, name === "open_cad" ? "ui://vibe-cad/editor-1.1.4.html" : undefined);
     assert.equal(
       tool._meta["openai/outputTemplate"],
-      name === "open_cad" ? "ui://vibe-cad/editor-1.1.3.html" : undefined,
+      name === "open_cad" ? "ui://vibe-cad/editor-1.1.4.html" : undefined,
     );
   }
+  // Reproduce a plugin update removing an old installation while its stdio
+  // process remains alive. First worker startup and UI reads must still work.
+  await rm(root, {recursive:true,force:true});
   const r = await client.callTool(
     {
       name: "run_steps",
@@ -101,7 +105,7 @@ try {
       .toString()
       .startsWith("ISO-10303-21;"),
   );
-  const ui = await client.readResource({ uri: "ui://vibe-cad/editor-1.1.3.html" });
+  const ui = await client.readResource({ uri: "ui://vibe-cad/editor-1.1.4.html" });
   assert.equal(ui.contents[0].mimeType, "text/html;profile=mcp-app");
   assert.ok(ui.contents[0].text.includes("3D CAD viewport"));
   const report = {
@@ -117,6 +121,7 @@ try {
     stepBytesDeliveredThroughMcp: true,
     uiResourceReadable: true,
     nativeEditorMetadataPresent: true,
+    survivesInstallationRemoval: true,
   };
   await writeFile(
     "output/package-verification.json",
@@ -125,5 +130,7 @@ try {
   console.log(report);
 } finally {
   await client.close();
+  const running = join(temp, `vibe-cad-running-${process.getuid?.() ?? 'user'}`);
+  assert.deepEqual(await readdir(running), [], 'Exited runtime retained its asset snapshot');
   await rm(temp, { recursive: true, force: true });
 }
