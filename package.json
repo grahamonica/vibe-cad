@@ -1,6 +1,6 @@
 {
   "name": "vibe-cad",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Monica Graham",
   "repository": "github:grahamonica/vibe-cad",
@@ -9,7 +9,7 @@
   "scripts": {
     "build": "vite build && tsc --noEmit && node scripts/build-runtime.mjs",
     "start": "sh scripts/launch.sh",
-    "test": "node --import tsx --test --test-concurrency=2 tests/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
     "package:plugin": "node scripts/package-plugin.mjs",
     "verify:plugin": "node scripts/verify-package.mjs"
   },

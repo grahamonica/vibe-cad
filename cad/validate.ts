@@ -79,6 +79,7 @@ export function validateDocument(d: Document) {
     names.add(v.name);
   }
   for (const c of d.components ?? []) {
+    if(c.motion && (!Number.isInteger(c.motion.dof)||c.motion.dof<0||c.motion.dof>6||c.grounded&&c.motion.dof>0)) throw Error('Motion intent needs 0 to 6 freedoms on an unfixed component');
     if (
       !finiteVector(c.position) ||
       !finiteVector(c.rotation) ||
@@ -100,6 +101,10 @@ export function validateDocument(d: Document) {
         throw Error("A body must belong to exactly one component");
       members.add(id);
     }
+  }
+  for(const m of d.mates??[]) if(m.type==='limitDistance'||m.type==='limitAngle') {
+    if(!Number.isFinite(m.min)||!Number.isFinite(m.max)||m.min!>=m.max!||Math.abs(m.min!)>10000||Math.abs(m.max!)>10000) throw Error('Mate limits need finite min < max');
+    if(m.type==='limitAngle'&&(m.min!< -180||m.max!>180))throw Error('Angle limits use signed angles between -180 and 180 degrees');
   }
   for (const p of d.componentPatterns ?? []) {
     const source = d.components?.find((c) => c.id === p.componentId);

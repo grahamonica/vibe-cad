@@ -57,6 +57,8 @@ export interface Constraint {
   expression?: string;
 }
 export interface Sketch {
+  /** Artwork may use fixed organic curves; functional sketches retain normal solver limits. */
+  purpose?: "artwork" | "functional";
   id: string;
   name: string;
   plane: "XY" | "XZ" | "YZ";
@@ -216,6 +218,8 @@ export interface Frame {
   normal: Vec3;
 }
 export interface Component {
+  /** Expected remaining freedom. This declares intent, never adds a constraint. */
+  motion?: { dof: number };
   id: string;
   name: string;
   /** Bodies of this document that move together. Empty for an inserted part. */
@@ -271,9 +275,14 @@ export interface Mate {
     | "tangent"
     | "angle"
     | "lock"
-    | "gear";
+    | "gear"
+    | "limitDistance"
+    | "limitAngle";
   moving: TopologyRef;
   target: TopologyRef;
+  /** Limit mates only: signed mm or signed degrees about the mated axis. */
+  min?: number;
+  max?: number;
   /** Distance (mm), angle (degrees) or, for gear mates, turns of the moving part per turn of the target. */
   value: number;
   /** Gear mates: the parts turn the same way (an internal gear, or pulleys on one belt). */
@@ -381,6 +390,8 @@ export type DrawingAnnotation =
       datums?: string[];
     };
 export interface DrawingSheet {
+  /** Absent on legacy sheets, whose saved projections remain Z-up. */
+  viewConvention?: 'y-up' | 'z-up';
   id: string;
   name: string;
   bodyIds: string[];
@@ -472,7 +483,7 @@ export interface Snapshot {
   /** Weight limit in grams (a robot's weight class), checked by mass properties. */
   weightLimit?: number;
   selection: TopologyRef[];
-  viewport?: { position: Vec3; target: Vec3 };
+  viewport?: { position: Vec3; target: Vec3; up?: Vec3; zoom?: number };
 }
 export interface HistoryEntry {
   id: string;
@@ -577,6 +588,8 @@ export interface ThreadRecord {
   leftHand?: boolean;
 }
 export interface Geometry {
+  /** Linked part revisions, so an assembly refreshes even when only its source part changed. */
+  dependencyKey?: string;
   bodies: RenderBody[];
   warnings: string[];
   placements?: Record<string, Placement>;
@@ -587,7 +600,7 @@ export interface Geometry {
   /** Each mate's state: met, over-defining (left unsolved) or unusable, as SolidWorks flags them. */
   mateStatus?: Record<string, { status: "ok" | "over" | "error"; message?: string; residual?: number }>;
   /** Each component's definition: (f) fixed, (-) under-defined with its remaining freedom, fully defined, (+) over-defined. */
-  componentStatus?: Record<string, { status: "fixed" | "under" | "full" | "over"; dof: number }>;
+  componentStatus?: Record<string, { status: "fixed" | "under" | "full" | "over"; dof: number; intentionalDof?: number; intentMismatch?: string }>;
 }
 export interface Preview {
   id: string;

@@ -203,6 +203,12 @@ const materialList = z.object({
 outputSchemas.list_materials = materialList;
 outputSchemas.save_material = materialList;
 outputSchemas.delete_material = materialList;
+outputSchemas.engine_info=z.object({version:z.string(),capabilities:z.array(z.string())});
+outputSchemas.manage_editors=z.object({limit:z.number(),closeRequested:z.boolean(),editors:z.array(z.object({sessionId:id,documentId:id,closed:z.boolean(),dirty:z.boolean()}).passthrough())}).passthrough();
+outputSchemas.inspect_design=z.object({design:z.object({id,revision:z.number()}).passthrough(),linked:z.array(z.object({id,revision:z.number()}).passthrough()).optional()});
+outputSchemas.validate_design=z.object({valid:z.boolean(),level:z.string(),revision:z.number(),milliseconds:z.number()}).passthrough();
+outputSchemas.control_build = z.object({ build: z.object({ state: z.string() }).passthrough() });
+outputSchemas.compact_storage = z.object({ dryRun: z.boolean(), compacted: z.array(id), removed: z.array(id), unusedBlobs: z.array(z.string()) });
 outputSchemas.check_motion = z.object({
   kind: z.string(),
   steps: z.array(z.object({ value: z.number(), clearance: z.number().nullable(), closest: z.string(), interference: z.array(z.object({ with: z.string(), volume: z.number(), by: z.string().optional() })) })),

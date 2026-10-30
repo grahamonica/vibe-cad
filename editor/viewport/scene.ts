@@ -21,6 +21,9 @@ import type {
 } from "../../cad/types.ts";
 import { textureInfo } from "../../cad/appearance.ts";
 import { textureCanvases } from "./textures.ts";
+import { prepareDrag } from '../../cad/drag-motion.ts';
+import { freeOrbit } from './camera-math.ts';
+import { cameraFor } from '../../cad/drawing.ts';
 
 export const palette = {
   white: "#FFFFFF",
@@ -67,17 +70,8 @@ export interface SceneOptions {
   /** false hides tangent edges (where faces meet smoothly), as SolidWorks' Tangent Edges Removed. */
   tangentEdges?: boolean;
 }
-const directions: Record<Exclude<Orientation, "fit">, Vec3> = {
-  front: [0, -1, 0],
-  back: [0, 1, 0],
-  top: [0, 0, 1],
-  bottom: [0, 0, -1],
-  left: [-1, 0, 0],
-  right: [1, 0, 0],
-  iso: [1, -1, 1],
-};
 const upFor = (dir: THREE.Vector3) =>
-  Math.abs(dir.z) > 0.999 ? new THREE.Vector3(0, dir.z > 0 ? 1 : -1, 0) : new THREE.Vector3(0, 0, 1);
+  Math.abs(dir.y) > 0.999 ? new THREE.Vector3(0, 0, dir.y > 0 ? -1 : 1) : new THREE.Vector3(0, 1, 0);
 
 interface BodyRecord {
   body: RenderBody;
@@ -144,9 +138,10 @@ export class CadScene {
   private cube: ViewCube;
   private triad: Triad;
   private disposed = false;
+  private mouseMode: 'model' | 'sketch' | 'orbit' = 'model';
   private labelUpdaters = new Set<() => void>();
-  onCameraChange?: (position: Vec3, target: Vec3) => void;
-  onComponentDrag?: (componentId: string, delta: Vec3) => void;
+  onCameraChange?: (position: Vec3, target: Vec3, up: Vec3, zoom: number) => void;
+  onComponentDrag?: (componentId: string, delta: Vec3, rotation: [number, number, number, number]) => void;
   constructor(readonly host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, stencil: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -162,8 +157,8 @@ export class CadScene {
     this.scene.environmentIntensity = 0.32;
     pmrem.dispose();
     this.camera = new THREE.OrthographicCamera(-50, 50, 50, -50, -100000, 100000);
-    this.camera.up.set(0, 0, 1);
-    this.camera.position.set(200, -200, 200);
+    this.camera.up.set(0, 1, 0);
+    this.camera.position.set(200, 200, 200);
     const headlight = new THREE.DirectionalLight("#ffffff", 1.6);
     headlight.position.set(-0.4, 0.6, 1);
     this.camera.add(headlight);
@@ -176,6 +171,7 @@ export class CadScene {
     this.controls.dampingFactor = 0.18;
     this.controls.zoomToCursor = true;
     this.controls.rotateSpeed = 0.9;
+    this.controls.enableRotate = false;
     this.controls.minZoom = 0.01;
     this.controls.maxZoom = 2000;
     this.setMouseMode("model");
@@ -189,12 +185,33 @@ export class CadScene {
         const object = this.transform.object;
         if (!object?.userData.componentId) return;
         const delta = object.position.clone().sub(new THREE.Vector3(...(object.userData.origin as Vec3)));
-        if (delta.length() > 1e-6)
-          this.onComponentDrag?.(object.userData.componentId, delta.toArray() as Vec3);
+        if (delta.length() > 1e-6 || object.quaternion.angleTo(new THREE.Quaternion()) > 1e-6)
+          this.onComponentDrag?.(object.userData.componentId, delta.toArray() as Vec3, object.quaternion.toArray());
       }
     });
+    this.transform.addEventListener("objectChange", () => this.projectDrag());
     this.transform.addEventListener("change", () => this.invalidate());
     this.scene.add(this.transform.getHelper());
+    let orbit: { id: number; x: number; y: number } | undefined;
+    const down = (e: PointerEvent) => {
+      if ((e.button !== 0 && e.button !== 1) || (this.mouseMode === 'sketch' && e.button === 0) || this.transform.axis || this.cubeHit(e.clientX, e.clientY) !== undefined) return;
+      this.tween = undefined;
+      orbit = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    };
+    const move = (e: PointerEvent) => {
+      if (!orbit || orbit.id !== e.pointerId || this.transform.dragging || !this.controls.enabled) return;
+      const scale = Math.PI * 2 / Math.max(240, Math.min(this.size.width, this.size.height));
+      const pose = freeOrbit(this.camera.position.toArray(), this.controls.target.toArray(), this.camera.up.toArray(),
+        (e.clientX - orbit.x) * scale, (e.clientY - orbit.y) * scale);
+      orbit.x = e.clientX; orbit.y = e.clientY;
+      this.camera.position.set(...pose.position); this.camera.up.set(...pose.up);
+      this.camera.lookAt(this.controls.target); this.invalidate();
+    };
+    const up = () => { if (orbit) this.emitCamera(); orbit = undefined; };
+    const el = this.renderer.domElement;
+    el.addEventListener('pointerdown', down); el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
+    this.disposeHooks.push(() => { el.removeEventListener('pointerdown', down); el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); el.removeEventListener('pointercancel', up); });
     this.cube = new ViewCube(this);
     this.triad = new Triad();
     const resize = new ResizeObserver(() => this.resize());
@@ -208,8 +225,31 @@ export class CadScene {
     loop();
     this.disposeHooks.push(() => resize.disconnect());
   }
+  private currentView?: View;
+  private dragMotion?: ReturnType<typeof prepareDrag>;
+  private dragMatrices = new Map<THREE.Object3D, THREE.Matrix4>();
+  private resetDrag() {
+    for(const [o,m]of this.dragMatrices){o.matrix.copy(m);o.matrix.decompose(o.position,o.quaternion,o.scale);o.matrixAutoUpdate=true;}
+    this.dragMatrices.clear();this.dragMotion=undefined;
+  }
+  private projectDrag() {
+    const target=this.transform.object,motion=this.dragMotion;
+    if(!target||!motion)return;
+    const cid=target.userData.componentId as string,start=motion.initial[cid];
+    const desired={position:target.position.toArray() as Vec3,quaternion:target.quaternion.clone().multiply(new THREE.Quaternion(...start.quaternion)).normalize().toArray() as [number,number,number,number]};
+    const projected=motion.solve(desired),pose=projected.components[cid];
+    target.position.set(...pose.position);target.quaternion.copy(new THREE.Quaternion(...pose.quaternion).multiply(new THREE.Quaternion(...start.quaternion).invert()));
+    for(const [id,r]of this.bodies){
+      const before=this.currentView?.geometry.placements?.[id],after=projected.bodies[id];if(!before||!after)continue;
+      const mat=(p:typeof before)=>new THREE.Matrix4().compose(new THREE.Vector3(...p.position),new THREE.Quaternion(...p.quaternion),new THREE.Vector3(1,1,1));
+      const delta=mat(after).multiply(mat(before).invert());
+      for(const o of recordObjects(r)) {const original=this.dragMatrices.get(o);if(!original)continue;o.matrixAutoUpdate=false;o.matrix.copy(delta).multiply(original);o.updateMatrixWorld(true);}
+    }
+    target.updateMatrixWorld(true);this.invalidate();
+  }
   private disposeHooks: (() => void)[] = [];
   setMouseMode(mode: "model" | "sketch" | "orbit") {
+    this.mouseMode = mode;
     this.controls.mouseButtons = {
       LEFT: mode === "sketch" ? (null as any) : THREE.MOUSE.ROTATE,
       MIDDLE: THREE.MOUSE.ROTATE,
@@ -238,6 +278,8 @@ export class CadScene {
     this.onCameraChange?.(
       this.camera.position.toArray() as Vec3,
       this.controls.target.toArray() as Vec3,
+      this.camera.up.toArray() as Vec3,
+      this.camera.zoom,
     );
   }
   /** World units per CSS pixel at the target depth (orthographic, so uniform). */
@@ -352,8 +394,8 @@ export class CadScene {
     const dir =
       type === "fit"
         ? this.camera.position.clone().sub(this.controls.target).normalize()
-        : new THREE.Vector3(...directions[type]).normalize();
-    const up = type === "fit" ? this.camera.up.clone() : upFor(dir);
+        : new THREE.Vector3(...cameraFor(type).dir).normalize();
+    const up = type === "fit" ? this.camera.up.clone() : new THREE.Vector3(...cameraFor(type).y);
     this.moveCamera(dir, sphere.center, up, this.zoomFor(Math.max(sphere.radius, 5)), animate);
   }
   /** Look straight at a plane (sketch "normal to"). */
@@ -405,11 +447,12 @@ export class CadScene {
     };
     this.invalidate();
   }
-  restoreCamera(position: Vec3, target: Vec3) {
+  restoreCamera(position: Vec3, target: Vec3, up?: Vec3, zoom?: number) {
     const dir = new THREE.Vector3(...position).sub(new THREE.Vector3(...target)).normalize();
     this.camera.position.copy(new THREE.Vector3(...target).addScaledVector(dir, 2000));
     this.controls.target.set(...target);
-    this.camera.up.copy(upFor(dir));
+    this.camera.up.copy(up ? new THREE.Vector3(...up) : upFor(dir));
+    if (zoom) { this.camera.zoom = zoom; this.camera.updateProjectionMatrix(); }
     this.controls.update();
     this.invalidate();
   }
@@ -607,7 +650,7 @@ export class CadScene {
     this.invalidate();
   }
   setGeometry(view: View | null, options: SceneOptions = {}) {
-    this.transform.detach();
+    this.transform.detach();this.resetDrag();this.currentView=view??undefined;
     this.clearGroup(this.explodeGroup);
     this.clearGroup(this.bodiesGroup);
     this.clearGroup(this.ghostGroup);
@@ -890,20 +933,20 @@ export class CadScene {
     }
   }
   /** Attach the translate gizmo to a body's displayed position (assembly component moves). */
-  attachGizmo(componentId: string, bodyIds: string[], position: Vec3) {
-    this.transform.detach();
-    const records = bodyIds.map((id) => this.bodies.get(id)).filter(Boolean) as BodyRecord[];
-    if (!records.length) return;
-    const wrapper = new THREE.Group();
-    wrapper.position.set(...position);
-    wrapper.userData = { componentId, origin: position };
-    for (const r of records)
-      for (const o of recordObjects(r)) {
-        o.position.sub(wrapper.position);
-        wrapper.add(o);
-      }
+  attachGizmo(componentId: string, bodyIds: string[], position: Vec3, mode: 'translate' | 'rotate' = 'translate', axis?: Vec3) {
+    this.transform.detach();this.resetDrag();
+    if(!bodyIds.some(id=>this.bodies.has(id)))return;
+    this.dragMotion=this.currentView&&prepareDrag(this.currentView,componentId);
+    const origin=this.dragMotion?.initial[componentId]?.position??position;
+    const wrapper=new THREE.Group();wrapper.position.set(...origin);wrapper.userData={componentId,origin};
+    for(const r of this.bodies.values())for(const o of recordObjects(r)){o.updateMatrix();this.dragMatrices.set(o,o.matrix.clone());}
     this.bodiesGroup.add(wrapper);
     this.transform.attach(wrapper);
+    this.transform.setMode(mode);
+    const principal = mode === 'rotate' && axis && axis.some(x => Math.abs(x) > 0.999999);
+    this.transform.showX = !principal || Math.abs(axis![0]) > 0.999999;
+    this.transform.showY = !principal || Math.abs(axis![1]) > 0.999999;
+    this.transform.showZ = !principal || Math.abs(axis![2]) > 0.999999;
     this.invalidate();
   }
   setSelection(refs: TopologyRef[], planes: string[] = []) {
@@ -1151,12 +1194,12 @@ class ViewCube {
   constructor(private owner: CadScene) {
     // Six labelled faces, each oriented from its outward normal and "up" so text reads correctly from outside.
     const faces: [string, Vec3, Vec3][] = [
-      ["FRONT", [0, -1, 0], [0, 0, 1]],
-      ["BACK", [0, 1, 0], [0, 0, 1]],
-      ["RIGHT", [1, 0, 0], [0, 0, 1]],
-      ["LEFT", [-1, 0, 0], [0, 0, 1]],
-      ["TOP", [0, 0, 1], [0, 1, 0]],
-      ["BOTTOM", [0, 0, -1], [0, -1, 0]],
+      ["FRONT", [0, 0, 1], [0, 1, 0]],
+      ["BACK", [0, 0, -1], [0, 1, 0]],
+      ["RIGHT", [1, 0, 0], [0, 1, 0]],
+      ["LEFT", [-1, 0, 0], [0, 1, 0]],
+      ["TOP", [0, 1, 0], [0, 0, -1]],
+      ["BOTTOM", [0, -1, 0], [0, 0, 1]],
     ];
     this.cube = new THREE.Mesh(new THREE.BoxGeometry(1.98, 1.98, 1.98), new THREE.MeshBasicMaterial({ color: palette.white }));
     this.scene.add(this.cube);

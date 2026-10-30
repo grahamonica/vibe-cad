@@ -6,6 +6,7 @@ import {
   context,
   initialize,
   onView,
+  onEditorClosed, editorAlive, noteEditorDocument, closeEditor, closeOtherEditors, setEditorDirty,
   onTransfer,
   type ViewTransfer,
 } from "./bridge.ts";
@@ -69,12 +70,15 @@ export interface DocumentSummary {
   bodyCount: number;
   branch?: { name: string; parentId: string };
 }
+interface BuildState { state: 'idle' | 'running' | 'pausing' | 'paused' | 'stopping'; step?: number; total?: number; documentId?: string }
 export function useCad() {
+  const [closed,setClosed]=useState(false);
   const [view, setView] = useState<View | null>(null),
     [loading, setLoading] = useState(true),
     [pending, setPending] = useState(0),
     [error, setError] = useState(""),
     [documents, setDocuments] = useState<DocumentSummary[]>([]),
+    [build, setBuild] = useState<BuildState>({ state: 'idle' }),
     [transfer, setTransfer] = useState<ViewTransfer>({
       active: false,
       received: 0,
@@ -83,7 +87,9 @@ export function useCad() {
   const latest = useRef<View | null>(null),
     queue = useRef<Promise<unknown>>(Promise.resolve()),
     pendingRef = useRef(0),
-    transferRef = useRef(transfer);
+    transferRef = useRef(transfer),
+    buildRef = useRef(build);
+  buildRef.current = build;
   latest.current = view;
   const accept = (v: View) => {
     if (!v?.document) return;
@@ -93,7 +99,9 @@ export function useCad() {
       v.document.revision < current.document.revision
     )
       return;
+    if(!editorAlive())return;
     latest.current = v;
+    noteEditorDocument(v.document.id);
     setView(v);
     if (!transferRef.current.active) void context(v).catch(() => {});
   };
@@ -105,6 +113,7 @@ export function useCad() {
     return result.documents;
   };
   useEffect(() => {
+    onEditorClosed(()=>{setClosed(true);setView(null);latest.current=null;});
     onView(accept);
     onTransfer((state) => {
       transferRef.current = state;
@@ -123,16 +132,18 @@ export function useCad() {
       }
     })();
     // Pick up edits made by the assistant through the same document.
+    let polling = false;
     const timer = setInterval(() => {
       const current = latest.current;
       if (
-        !current ||
+        !editorAlive() || !current ||
         pendingRef.current ||
         transferRef.current.active ||
         transferRef.current.error ||
-        document.hidden
+        document.hidden || polling
       )
         return;
+      polling = true;
       void call("inspect_document_state", { documentId: current.document.id })
         .then(async (state: any) => {
           const now = latest.current;
@@ -141,6 +152,7 @@ export function useCad() {
             !now ||
             now.document.id !== state.documentId ||
             (state.revision === now.document.revision &&
+              (state.dependencyKey ?? '') === (now.geometry.dependencyKey ?? '') &&
               JSON.stringify(state.selection) ===
                 JSON.stringify(now.document.selection) &&
               state.previewId === (now.preview?.id ?? null))
@@ -151,15 +163,33 @@ export function useCad() {
           });
           if (!pendingRef.current) accept(updated);
         })
-        .catch(() => {});
+        .catch(() => {}).finally(() => { polling = false; });
     }, 2500);
     return () => clearInterval(timer);
   }, []);
+  useEffect(() => {
+    let polling = false, unsupported = false, disposed = false;
+    const timer = setInterval(() => {
+      if (!editorAlive() || polling || unsupported || document.hidden) return;
+      polling = true;
+      void call<{ build: BuildState }>('control_build', { action: 'status' })
+        .then(r => { if (!disposed) setBuild(r.build); })
+        .catch(() => { unsupported = true; })
+        .finally(() => { polling = false; });
+    }, 1500);
+    return () => { disposed = true; clearInterval(timer); };
+  }, []);
+  const controlBuild = async (action: 'pause' | 'resume' | 'cancel') => {
+    try { const r = await call<{ build: BuildState }>('control_build', { action }); setBuild(r.build); }
+    catch (e) { setError((e as Error).message); }
+  };
   /** Run a tool after every earlier command, using the newest revision. */
   const execute = <T = any>(
     name: string,
     args: Record<string, any> = {},
   ): Promise<T> => {
+    if (buildRef.current.state !== 'idle' && buildRef.current.state !== 'paused' && !['set_selection', 'set_viewport', 'inspect_document', 'inspect_document_state'].includes(name))
+      return Promise.reject(Error('Pause the active build before editing the design'));
     if (transferRef.current.active || transferRef.current.error)
       return Promise.reject(
         Error(
@@ -227,10 +257,17 @@ export function useCad() {
     }
   };
   return {
+    closed,
+    setEditorDirty,
+    closeOtherEditors,
+    closeEditor: async()=>{await queue.current;return closeEditor();},
     view,
     latest,
     loading,
-    busy: pending > 0 || transfer.active,
+    pendingEdits: pending > 0,
+    busy: pending > 0 || transfer.active || !['idle', 'paused'].includes(build.state),
+    build,
+    controlBuild,
     transfer,
     error,
     setError,

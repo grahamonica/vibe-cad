@@ -70,24 +70,25 @@ const perp2 = (a: Vec2): Vec2 => [-a[1], a[0]];
 // ---------------------------------------------------------------------------
 // Orientation
 const orientations: Record<ViewOrientation, { dir: Vec3; x: Vec3 }> = {
-  front: { dir: [0, -1, 0], x: [1, 0, 0] },
-  back: { dir: [0, 1, 0], x: [-1, 0, 0] },
-  top: { dir: [0, 0, 1], x: [1, 0, 0] },
-  bottom: { dir: [0, 0, -1], x: [1, 0, 0] },
-  right: { dir: [1, 0, 0], x: [0, 1, 0] },
-  left: { dir: [-1, 0, 0], x: [0, -1, 0] },
-  iso: { dir: norm3([1, -1, 1]), x: norm3([1, 1, 0]) },
-  dimetric: { dir: norm3([0.9, -1, 0.55]), x: norm3([1, 0.9, 0]) },
-  trimetric: { dir: norm3([0.6, -1, 0.75]), x: norm3([1, 0.6, 0]) },
+  front: { dir: [0, 0, 1], x: [1, 0, 0] },
+  back: { dir: [0, 0, -1], x: [-1, 0, 0] },
+  top: { dir: [0, 1, 0], x: [1, 0, 0] },
+  bottom: { dir: [0, -1, 0], x: [1, 0, 0] },
+  right: { dir: [1, 0, 0], x: [0, 0, -1] },
+  left: { dir: [-1, 0, 0], x: [0, 0, 1] },
+  iso: { dir: norm3([1, 1, 1]), x: norm3([1, 0, -1]) },
+  dimetric: { dir: norm3([0.9, 0.55, 1]), x: norm3([1, 0, -0.9]) },
+  trimetric: { dir: norm3([0.6, 0.75, 1]), x: norm3([1, 0, -0.6]) },
 };
 export interface ViewCamera {
   dir: Vec3;
   x: Vec3;
   y: Vec3;
 }
-export function cameraFor(o: ViewOrientation): ViewCamera {
+export function cameraFor(o: ViewOrientation, convention: 'y-up' | 'z-up' = 'y-up'): ViewCamera {
   const { dir, x } = orientations[o] ?? orientations.front;
-  return { dir, x, y: cross(dir, x) };
+  const turn = (v: Vec3): Vec3 => convention === 'z-up' ? [v[0], -v[2], v[1]] : v;
+  return { dir: turn(dir), x: turn(x), y: turn(cross(dir, x)) };
 }
 /** Orthographic neighbour of a view in a given sheet direction. */
 export function projectedOrientation(parent: ViewOrientation, side: "left" | "right" | "above" | "below", projection: "first" | "third"): ViewOrientation {

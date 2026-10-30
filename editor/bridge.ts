@@ -19,35 +19,63 @@ let transferGeneration = 0;
 export function onTransfer(fn: (state: ViewTransfer) => void) {
   transferListener = fn;
 }
+const editorSessionId=globalThis.crypto.randomUUID();
+let editorDocumentId:string|undefined,editorDirty=false,closed=false,registrySupported=true;
+let closeListener:(()=>void)|undefined,editorTimer:ReturnType<typeof setInterval>|undefined;
+export function onEditorClosed(fn:()=>void){closeListener=fn;}
+export function setEditorDirty(dirty:boolean){const changed=editorDirty!==dirty;editorDirty=dirty;if(changed)void editorRegistry('heartbeat');}
+export const editorAlive=()=>!closed;
+function retireEditor(){if(closed)return;closed=true;listener=undefined;transferGeneration++;if(editorTimer)clearInterval(editorTimer);closeListener?.();}
+async function editorRegistry(action:'register'|'heartbeat'|'close'|'close_others'){
+ if(!app||!registrySupported||!editorDocumentId)return;
+ try{
+  const r=await app.callServerTool({name:'manage_editors',arguments:{action,sessionId:editorSessionId,documentId:editorDocumentId,dirty:editorDirty},_meta:{'vibe-cad/source':'user'}});
+  if(r.isError){registrySupported=false;return;}
+  const result=r.structuredContent as {closeRequested?:boolean}|undefined;
+  if(result?.closeRequested&&!editorDirty){retireEditor();await app.requestTeardown().catch(()=>{});}
+ }catch{registrySupported=false;}
+}
+export function noteEditorDocument(id:string){if(closed||editorDocumentId===id)return;editorDocumentId=id;void editorRegistry('register');}
+export async function closeEditor(){if(editorDirty)throw Error('Finish or cancel unsaved edits before closing');await editorRegistry('heartbeat');await editorRegistry('close');if(!closed){retireEditor();await app?.requestTeardown();}}
+export async function closeOtherEditors(){await editorRegistry('close_others');}
 export async function initialize() {
   if (ready) return ready;
   app = new App(
-    { name: "Vibe CAD", version: "1.0.0" },
+    { name: "Vibe CAD", version: "1.1.0" },
     { availableDisplayModes: ["inline", "fullscreen"] },
     { autoResize: false },
   );
   app.ontoolresult = async (result) => {
-    const view = await readToolView(result._meta);
-    if (view) listener?.(view);
+    try {
+      const id=(result.structuredContent as any)?.document?.id;
+      if(id)noteEditorDocument(id);
+      const view = await readToolView(result._meta, id);
+      if (view) listener?.(view);
+    } catch { /* transfer status presents one recoverable error, not an unhandled rejection */ }
   };
   app.onteardown = async () => {
+    retireEditor();
     transferGeneration++;
     transferListener?.({ active: false, received: 0, total: 0 });
     return {};
   };
   ready = app.connect();
   await ready;
+  editorTimer=setInterval(()=>{if(!closed)void editorRegistry('heartbeat');},1000);
 }
 async function readToolView(
   meta: Record<string, unknown> | undefined,
+  hintDocumentId?: string,
+  recover = true,
 ): Promise<View | undefined> {
+  if(closed)return;
   if (meta?.view) {
     transferGeneration++;
     transferListener?.({ active: false, received: 0, total: 0 });
     return meta.view as View;
   }
   const snapshot = meta?.viewChunks as
-    { uriPrefix: string; count: number; encoding: string } | undefined;
+    { uriPrefix: string; count: number; encoding: string; documentId?: string } | undefined;
   if (!snapshot) return;
   if (
     !app ||
@@ -66,7 +94,7 @@ async function readToolView(
   const compressed = new ReadableStream<BufferSource>({
     async pull(controller) {
       try {
-        if (generation !== transferGeneration)
+        if (closed || generation !== transferGeneration)
           throw Error("CAD view was superseded");
         if (index === snapshot.count) {
           controller.close();
@@ -114,6 +142,14 @@ async function readToolView(
     return view;
   } catch (e) {
     if (generation !== transferGeneration) return;
+    const documentId = snapshot.documentId ?? hintDocumentId;
+    if (recover && documentId && /snapshot.*unavailable|snapshot.*missing/i.test((e as Error).message)) {
+      try {
+      const refreshed = await app!.callServerTool({ name: 'inspect_document', arguments: { documentId }, _meta: { 'vibe-cad/source': 'user' } });
+      if (generation !== transferGeneration) return;
+      if (!refreshed.isError) return readToolView(refreshed._meta, documentId, false);
+      } catch { /* report a recoverable transfer error below */ }
+    }
     transferListener?.({
       active: false,
       received,
@@ -153,7 +189,7 @@ export async function call<T = any>(
       data,
     } as T;
   }
-  return ((await readToolView(result._meta)) ?? result.structuredContent) as T;
+  return ((await readToolView(result._meta, (result.structuredContent as any)?.document?.id)) ?? result.structuredContent) as T;
 }
 export async function context(view: View) {
   if (!app) return;

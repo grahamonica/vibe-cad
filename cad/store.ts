@@ -75,6 +75,30 @@ class FilePersistence implements DocumentPersistence {
         ),
     );
   }
+  async listMetadata() {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const out = [];
+    for (const name of await readdir(this.directory)) {
+      if (!name.endsWith('.json')) continue;
+      const d = JSON.parse(await readFile(join(this.directory, name), 'utf8')) as Document;
+      out.push({ id: d.id, owner: d.owner, name: d.name, revision: d.revision,
+        updatedAt: d.updatedAt, bodyCount: d.bodies.length });
+    }
+    return out;
+  }
+  async deleteDocument(id: string, expectedRevision: number) {
+    const file = this.file(id), path = `${file}.lock`;
+    const lock = await open(path, 'wx', 0o600);
+    try {
+      if ((await this.read(id)).revision !== expectedRevision) throw Error('Document changed during cleanup');
+      await rm(file);
+    } finally { await lock.close(); await rm(path, { force: true }); }
+  }
+  async listBlobs() {
+    return (await readdir(join(this.directory, 'blobs')).catch(() => []))
+      .filter(n => /^[0-9a-f]{64}$/.test(n));
+  }
+  async deleteBlob(hash: string) { await rm(this.blob(hash), { force: true }); }
   async read(id: string): Promise<Document> {
     try {
       return JSON.parse(await readFile(this.file(id), "utf8"));

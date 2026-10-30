@@ -1,7 +1,9 @@
 import { z } from "zod";
+import { designChanges, applyDesignChanges, designJSON } from "./design-json.ts";
 import { materialProps } from "./material-schema.ts";
 import { findTopology } from "./topology-key.ts";
-import { allComponents, componentOf, componentOwns } from "./types.ts";
+import { allComponents, componentOf, componentOwns, snapshot } from "./types.ts";
+import { BuildInterrupted } from './build-control.ts';
 import { autoExplode, eulerDegrees, gearPhase, localTopology, mateLoops, solveComponents, type SolveReport } from "./assembly.ts";
 import { Euler, Quaternion, Vector3 } from "three";
 import { originFrame } from "./frame.ts";
@@ -37,6 +39,7 @@ import {
   mechanismSweep,
   lineCrossings,
   renderDrawing,
+  closeKernel,
 } from "./geometry.ts";
 import type {
   ViewOrientation,
@@ -188,6 +191,22 @@ export function toolset(store: Store) {
       source,
       edit,
     );
+  add('control_build', 'Pause or stop build',
+    'Inspect, pause, resume or stop the current batch. Pause takes effect after the current step. Stop interrupts the kernel and keeps committed steps. Edits made while paused are preserved and require the assistant to re-plan.',
+    { action: z.enum(['status', 'pause', 'resume', 'cancel']) }, false,
+    async a => {
+      const previous = store.buildControl.status();
+      const build = store.buildControl.control(a.action);
+      if (a.action === 'cancel' && previous.state !== 'idle' && previous.state !== 'paused') await closeKernel();
+      return { build };
+    });
+  add('compact_storage', 'Compact project storage',
+    'Preview or apply explicitly scoped cleanup. Keep current root assemblies and linked parts, discard their old undo snapshots, remove only listed unused candidate documents and unreferenced imports. Other projects and their history references are protected. Never rewrites Git history.',
+    { rootDocumentIds: z.array(id).min(1).max(100), candidateDocumentIds: z.array(id).max(500), dryRun: z.boolean().default(true) }, false,
+    async a => {
+      if (store.buildControl.status().state !== 'idle') throw Error('Stop the active build before storage cleanup');
+      return store.compactStorage(a.rootDocumentIds, a.candidateDocumentIds, a.dryRun);
+    }, { destructive: true });
   const releasePlacement = async (documentId: string, mateId: string) => {
     const d = await store.read(documentId),
       v = await store.view(d),
@@ -275,6 +294,18 @@ export function toolset(store: Store) {
     d.features.push(f);
     return f;
   };
+  add('engine_info','CAD engine version','Read the running engine version and supported fast-edit, motion and editor lifecycle capabilities.',{},true,async()=>({version:'1.1.0',capabilities:['typed-design-json','atomic-bulk-edits','motion-intent','mate-travel-limits','editor-session-close']}));
+  add('manage_editors','Manage open CAD editors','List live editor panels, close a panel, or close unused editors except the current document/session. Unsaved drafts are protected. Editors request host teardown and release their renderer when retired.',
+    {action:z.enum(['list','register','heartbeat','close','close_others']),sessionId:id.optional(),documentId:id.optional(),dirty:z.boolean().default(false)},false,
+    async a=>store.editors.update(a.action,a.sessionId,a.documentId,a.dirty));
+  add('inspect_design','Read lightweight design JSON','Read authoritative sketches, dimensions, variables, features, component placements and mates without meshes, history copies or imported bytes. Optional linked designs are current dependencies only.',
+    {...base,includeLinked:z.boolean().default(false)},true,async a=>{const d=await store.read(a.documentId);return {design:designJSON(d),...(a.includeLinked?{linked:Object.values(await store.linkedDocuments(d)).map(designJSON)}:{})};});
+  add('edit_design','Apply atomic design JSON edits','Apply many sketch replacements, numeric feature edits, variables and component poses in one validated transaction and one kernel rebuild. Fixed whole profiles require purpose artwork; functional interfaces should be dimensioned. IDs and source imports remain protected.',
+    {...write,changes:designChanges},false,async(a,source)=>store.transact(a.documentId,a.expectedRevision,a.reason??'Edited design JSON',source,d=>applyDesignChanges(d,a.changes,randomUUID)));
+  add('validate_design','Validate design JSON without saving','Validate candidate structured changes without committing. Structure checks solve sketches but cannot certify assembly definition without geometry. Geometry checks rebuild and report actual mate definition. Always use current expectedRevision.',
+    {...write,changes:designChanges.optional(),level:z.enum(['structure','geometry']).default('geometry')},true,async a=>store.validateEdit(a.documentId,a.expectedRevision,d=>{if(a.changes)applyDesignChanges(d,a.changes,randomUUID);},a.level));
+  add('set_component_motion','Declare intended component movement','Declare the expected remaining degrees of freedom (0 to 6), or null to clear. Does not add constraints or make unconstrained geometry valid. Actual mates determine motion; use limitDistance/limitAngle mates to bound travel.',
+    {...write,componentId:id,dof:z.number().int().min(0).max(6).nullable()},false,async(a,source)=>mutate(a,source,'Changed motion intent',d=>{const c=d.components?.find(c=>c.id===a.componentId);if(!c)throw Error('Component not found');if(a.dof===null)delete c.motion;else c.motion={dof:a.dof};}));
   add(
     "list_documents",
     "List CAD documents",
@@ -440,20 +471,22 @@ export function toolset(store: Store) {
     "set_viewport",
     "Set viewport camera",
     "Save camera position and target in the shared document.",
-    { ...base, position: vec3, target: vec3 },
+    { ...base, position: vec3, target: vec3, up: nonzero.optional(), zoom: positive.optional() },
     false,
     async (a) => {
       const d = await store.read(a.documentId);
       return store.setContext(a.documentId, d.selection, {
         position: a.position,
         target: a.target,
+        ...(a.up ? { up: a.up } : {}),
+        ...(a.zoom ? { zoom: a.zoom } : {}),
       });
     },
   );
   add(
     "create_sketch",
     "Create constrained sketch",
-    "Create a sketch on the Top (XY), Front (XZ) or Right (YZ) plane, a datum plane, or an inspected planar face. Face sketches project the part origin onto the face, so sketch coordinates stay put when the face grows. Coordinates are plane-local mm.",
+    "Create a sketch on the Front (XY), Top (XZ) or Right (YZ) plane, a datum plane, or an inspected planar face. Y is up; front looks from +Z. Face sketches project the part origin onto the face. Coordinates are plane-local mm.",
     {
       ...write,
       ...named,
@@ -3280,11 +3313,11 @@ export function toolset(store: Store) {
     "export_file",
     "Export CAD file",
     "Export real STEP B-rep, binary STL, an editable JSON document, or a self-contained .edit native project preserving features, drawings, assembly parts/mates and original imports. Returns a file name, MIME type and download information for the editor runtime. No file is uploaded.",
-    { ...base, format: z.enum(["step", "stl", "json", "edit"]), bodyId: id.optional() },
+    { ...base, format: z.enum(["step", "stl", "json", "edit"]), bodyId: id.optional(), includeHistory: z.boolean().default(false) },
     false,
     async (a) => {
       const d = await store.read(a.documentId),
-        out = a.format === 'edit' ? {mime:'application/json',bytes:new TextEncoder().encode(await exportProject(store,d.id))} : await exportModel(a.format === "json" ? d : await store.kernelDocument(d), a.format, a.bodyId),
+        out = a.format === 'edit' ? {mime:'application/json',bytes:new TextEncoder().encode(await exportProject(store,d.id,a.includeHistory))} : await exportModel(a.format === "json" ? d : await store.kernelDocument(d), a.format, a.bodyId),
         filename = `${d.name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80)}-r${d.revision}.${a.format}`;
       return saveExport(store.directory, d.id, filename, out.mime, out.bytes);
     },
@@ -3781,14 +3814,19 @@ export function toolset(store: Store) {
         "angle",
         "lock",
         "gear",
+        "limitDistance",
+        "limitAngle",
       ]),
       moving: ref,
       target: ref,
       value: scalar.default(0),
+      min: scalar.optional(),
+      max: scalar.optional(),
       aligned: z.boolean().optional(),
     },
     false,
     async (a, s) => {
+      if((a.type==='limitDistance'||a.type==='limitAngle')&&(a.min===undefined||a.max===undefined))throw Error('Limit mates require min and max');
       // Default alignment: whichever the parts are closest to now, so a new mate never flips a part.
       let aligned = a.aligned;
       let ratio = a.value,
@@ -3859,6 +3897,7 @@ export function toolset(store: Store) {
             a.name ??
             `${a.type[0].toUpperCase()}${a.type.slice(1)} ${(d.mates ?? []).filter((m) => m.type === a.type).length + 1}`,
           type: a.type,
+          ...(a.min!==undefined?{min:a.min,max:a.max}:{}),
           moving: a.moving,
           target: a.target,
           value: ratio,
@@ -3900,6 +3939,8 @@ export function toolset(store: Store) {
       mateId: id,
       type: z.enum(["coincident", "distance", "parallel", "perpendicular", "concentric", "tangent", "angle", "lock"]).optional(),
       value: scalar.optional(),
+      min: scalar.optional(),
+      max: scalar.optional(),
       aligned: z.boolean().optional(),
       phase: z.number().finite().min(-360).max(360).optional(),
     },
@@ -3913,6 +3954,8 @@ export function toolset(store: Store) {
         if (a.type) m.type = a.type;
         if (a.phase !== undefined) m.phase = a.phase;
         if (m.type === "gear" && a.value !== undefined && !(a.value > 0)) throw Error("The gear ratio must be positive");
+        if(a.min!==undefined)m.min=a.min;
+        if(a.max!==undefined)m.max=a.max;
         if (a.value !== undefined) m.value = a.value;
         if (a.aligned !== undefined) m.aligned = a.aligned;
         if (m.type === "angle" && (m.value < 0 || m.value > 180))
@@ -4086,6 +4129,7 @@ export function toolset(store: Store) {
     generalTolerance: z.string().max(80),
   };
   const drawingFields = {
+    viewConvention: z.enum(['y-up', 'z-up']).default('y-up'),
     name: z.string().min(1).max(100),
     size: sheetSize.default("A4"),
     orientation: z.enum(["landscape", "portrait"]).default("landscape"),
@@ -4664,7 +4708,7 @@ export function toolset(store: Store) {
   // ---------------------------------------------------------------------------
   // run_steps: many typed tool calls in one request, for building fast.
   /** Tools a batch cannot run: itself, history and preview flows, and git. */
-  const notInBatch = (name: string) => name === "run_steps" || ["undo", "redo", "restore_history", "preview_feature", "apply_preview", "dismiss_preview"].includes(name) || name.startsWith("git_");
+  const notInBatch = (name: string) => name === "run_steps" || ["control_build", "compact_storage", "undo", "redo", "restore_history", "preview_feature", "apply_preview", "dismiss_preview"].includes(name) || name.startsWith("git_");
   const kinds = { document: "", sketch: "sketches", feature: "features", body: "bodies", component: "components", mate: "mates", drawing: "drawings", plane: "referencePlanes", entity: "" } as const;
   type Kind = keyof typeof kinds;
   /** What a step made: ids of new objects of each kind, found by comparing the document before and after. */
@@ -4786,9 +4830,12 @@ Example, a plate with a hole and rounded corners: [{"tool":"create_sketch","args
     { documentId: id.optional(), steps: z.array(stepSchema).min(1).max(60), atomic: z.boolean().default(true) },
     false,
     async (a, s) => {
+      const managed = !(s === 'user' && store.buildControl.status().state === 'paused');
+      if (managed) store.buildControl.start(a.documentId, a.steps.length);
+      try {
       const named = new Map<string, { document?: string; made: Partial<Record<Kind, string[]>>; result?: unknown }>();
       // Documents changed, with the history entry to go back to; documents the batch created.
-      const touched = new Map<string, string>(),
+      const touched = new Map<string, ReturnType<typeof snapshot>>(),
         created: string[] = [];
       const results: Record<string, unknown>[] = [];
       let current: string | undefined = a.documentId;
@@ -4830,12 +4877,16 @@ Example, a plate with a hole and rounded corners: [{"tool":"create_sketch","args
       const rollBack = async () => {
         for (const [docId, entry] of touched) {
           const d = await store.read(docId).catch(() => undefined);
-          if (d && d.history[d.historyIndex]?.id !== entry) await store.restore(docId, d.revision, entry);
+          if (d) await store.restoreSnapshot(docId, d.revision, entry, 'Rolled back failed batch');
         }
       };
       for (const [index, step] of a.steps.entries()) {
         const tool = tools.find((t) => t.name === step.tool);
         try {
+          if (managed) await store.buildControl.boundary(index, current, async () => {
+            const ids = [...new Set([...touched.keys(), ...created, ...(current ? [current] : [])])];
+            return Object.fromEntries(await Promise.all(ids.map(async id => [id, (await store.read(id)).revision])));
+          });
           if (!tool || notInBatch(step.tool)) throw Error(`${step.tool} cannot run in a batch`);
           const args = resolve(step.args) as Record<string, unknown>;
           const takesDocument = "documentId" in tool.schema.shape;
@@ -4846,7 +4897,7 @@ Example, a plate with a hole and rounded corners: [{"tool":"create_sketch","args
           const ready = (await select(args, view)) as Record<string, unknown>;
           const before = docId ? await store.read(docId) : undefined;
           if (before && "expectedRevision" in tool.schema.shape && ready.expectedRevision === undefined) ready.expectedRevision = before.revision;
-          if (before && !tool.readOnly && !touched.has(before.id) && !created.includes(before.id)) touched.set(before.id, before.history[before.historyIndex]?.id ?? "");
+          if (before && !tool.readOnly && !touched.has(before.id) && !created.includes(before.id)) touched.set(before.id, snapshot(before));
           const warnings = new Set(before ? (await view()).geometry.warnings : []);
           const result: any = await tool.handler(tool.schema.parse(ready), s);
           const resultDoc: string | undefined = result?.document?.id ?? docId;
@@ -4864,12 +4915,14 @@ Example, a plate with a hole and rounded corners: [{"tool":"create_sketch","args
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e);
           results.push({ step: index + 1, tool: step.tool, ...(step.as ? { as: step.as } : {}), ok: false, error: message });
-          if (a.atomic) await rollBack();
+          const interrupted = e instanceof BuildInterrupted || (managed && store.buildControl.status().state === 'stopping');
+          if (a.atomic && !interrupted) await rollBack();
           return {
             ok: false,
             failedStep: index + 1,
             error: `Step ${index + 1} (${step.tool}): ${message}`,
-            rolledBack: a.atomic,
+            rolledBack: a.atomic && !interrupted,
+            ...(interrupted ? { interrupted: true } : {}),
             steps: results,
             ...(created.length ? { createdDocuments: created } : {}),
           };
@@ -4889,6 +4942,7 @@ Example, a plate with a hole and rounded corners: [{"tool":"create_sketch","args
             }
           : {}),
       };
+      } finally { if (managed) store.buildControl.finish(); }
     },
     { ui: true },
   );

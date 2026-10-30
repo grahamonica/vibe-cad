@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { KernelWorkerClient } from "./kernel-worker-client.ts";
 import type {
   Document,
   Geometry,
@@ -6,16 +7,8 @@ import type {
   DrawingProjection,
 } from "./types.ts";
 // A local worker isolates the WASM kernel. Serialize requests because OCCT is not reentrant.
-let worker: Worker | undefined;
-let seq = 0;
-let chain: Promise<unknown> = Promise.resolve();
-const pending = new Map<
-  number,
-  { resolve: (v: any) => void; reject: (e: Error) => void }
->();
-function getWorker() {
-  if (worker) return worker;
-  worker = new Worker(
+const client = new KernelWorkerClient(() =>
+  new Worker(
     new URL(
       import.meta.url.endsWith(".mjs")
         ? "./geometry-worker.mjs"
@@ -23,36 +16,10 @@ function getWorker() {
       import.meta.url,
     ),
     { execArgv: [] },
-  );
-  worker.on("message", ({ id, result, error }) => {
-    const p = pending.get(id);
-    if (!p) return;
-    pending.delete(id);
-    error ? p.reject(Error(error)) : p.resolve(result);
-  });
-  worker.on("error", (e) => {
-    for (const p of pending.values())
-      p.reject(e instanceof Error ? e : Error(String(e)));
-    pending.clear();
-    worker = undefined;
-  });
-  worker.on("exit", () => {
-    for (const p of pending.values()) p.reject(Error("CAD kernel stopped"));
-    pending.clear();
-    worker = undefined;
-  });
-  return worker;
-}
+  ),
+);
 function call<T>(method: string, args: unknown[]): Promise<T> {
-  const run = () =>
-    new Promise<T>((resolve, reject) => {
-      const id = ++seq;
-      pending.set(id, { resolve, reject });
-      getWorker().postMessage({ id, method, args });
-    });
-  const result = chain.then(run, run);
-  chain = result.catch(() => {});
-  return result;
+  return client.call<T>(method, args);
 }
 export const rebuild = (doc: Document) => call<Geometry>("rebuild", [doc]);
 export const exportModel = (doc: Document, format: string, bodyId?: string) =>
@@ -110,8 +77,7 @@ export const faceOutline = (doc: Document, ref: TopologyRef) =>
 export const projectEdges = (doc: Document, sketchId: string, refs: TopologyRef[]) =>
   call<{ ref: TopologyRef; type: "line" | "circle" | "arc"; values: Record<string, number> }[]>("projectEdges", [doc, sketchId, refs]);
 export async function closeKernel() {
-  await worker?.terminate();
-  worker = undefined;
+  await client.close();
 }
 
 export const renderDrawing = (doc: Document, drawingId: string, format: "svg" | "pdf" | "dxf" = "svg") =>

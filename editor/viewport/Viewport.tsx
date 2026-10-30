@@ -30,7 +30,7 @@ export interface ViewportProps {
   explodeOffsets?: Record<string, Vec3>;
   /** Section view: keep normal · p ≤ offset. */
   section?: { normal: Vec3; offset: number } | null;
-  gizmo?: { componentId: string; bodyIds: string[]; position: Vec3 };
+  gizmo?: { componentId: string; bodyIds: string[]; position: Vec3; mode: 'translate' | 'rotate'; axis?: Vec3 };
   fadeBodies?: boolean;
   /** Bodies left out of the view (Isolate shows only some components). */
   hiddenBodies?: Set<string>;
@@ -42,11 +42,11 @@ export interface ViewportProps {
   onHover?: (pick: Pick | null) => void;
   onContextMenu: (pick: Pick | null, x: number, y: number) => void;
   onDoubleClick: (pick: Pick | null) => void;
-  onCamera: (position: Vec3, target: Vec3) => void;
+  onCamera: (position: Vec3, target: Vec3, up: Vec3, zoom: number) => void;
   onSketchCommit: (ops: SketchOp[], reason?: string) => Promise<Sketch | undefined>;
   onSketchChange: () => void;
   onEditValue: (constraintId: string, value: number, at: [number, number]) => void;
-  onComponentDrag?: (componentId: string, delta: Vec3) => void;
+  onComponentDrag?: (componentId: string, delta: Vec3, rotation: [number, number, number, number]) => void;
 }
 const toWorld = (f: Frame, p: Vec2) =>
   new THREE.Vector3(...f.origin)
@@ -79,8 +79,8 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
       return;
     }
     sceneRef.current = scene;
-    scene.onCameraChange = (position, target) => propsRef.current.onCamera(position, target);
-    scene.onComponentDrag = (id, delta) => propsRef.current.onComponentDrag?.(id, delta);
+    scene.onCameraChange = (position, target, up, zoom) => propsRef.current.onCamera(position, target, up, zoom);
+    scene.onComponentDrag = (id, delta, rotation) => propsRef.current.onComponentDrag?.(id, delta, rotation);
     const canvas = scene.renderer.domElement;
     let down: { x: number; y: number; button: number } | undefined;
     const toPick = (e: PointerEvent | MouseEvent): Pick | null => {
@@ -215,7 +215,7 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
   }, []);
   // Bodies and previews.
   // Streamed bodies arrive at one pinned revision; refresh the scene as they arrive.
-  const geometryKey = props.view ? `${props.view.document.id}:${props.view.document.revision}:${props.view.geometry.bodies.length}` : "none";
+  const geometryKey = props.view ? `${props.view.document.id}:${props.view.document.revision}:${props.view.geometry.dependencyKey ?? ''}:${props.view.geometry.bodies.length}` : "none";
   useEffect(() => {
     sceneRef.current?.setGeometry(props.view, {
       ghost: props.ghost,
@@ -226,7 +226,7 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
       displayStyle: props.displayStyle,
     });
     sceneRef.current?.setExplode(props.explode ?? 0, props.explodeOffsets);
-    if (props.gizmo) sceneRef.current?.attachGizmo(props.gizmo.componentId, props.gizmo.bodyIds, props.gizmo.position);
+    if (props.gizmo) sceneRef.current?.attachGizmo(props.gizmo.componentId, props.gizmo.bodyIds, props.gizmo.position, props.gizmo.mode, props.gizmo.axis);
     sceneRef.current?.setSelection(props.highlight.refs, props.highlight.planes);
   }, [geometryKey, props.ghost, props.solidPreview, props.fadeBodies, JSON.stringify(props.gizmo), [...(props.hiddenBodies ?? [])].join(), props.tangentEdges, props.displayStyle]);
   // Exploding only moves bodies.
@@ -244,10 +244,14 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
   useEffect(() => {
     const scene = sceneRef.current,
       v = props.view;
-    if (!scene || !v || !v.geometry.bodies.length || restored.current === v.document.id) return;
-    restored.current = v.document.id;
-    if (v.document.viewport) scene.restoreCamera(v.document.viewport.position, v.document.viewport.target);
-    requestAnimationFrame(() => scene.orient(v.document.viewport ? "fit" : "iso", false));
+    if (!scene || !v || !v.geometry.bodies.length) return;
+    if (restored.current !== v.document.id) {
+      restored.current = v.document.id;
+      if (v.document.viewport) scene.restoreCamera(v.document.viewport.position, v.document.viewport.target, v.document.viewport.up, v.document.viewport.zoom);
+    }
+    // Refit after the streamed assembly settles, rather than centering permanently on its first body.
+    const timer = setTimeout(() => scene.orient(v.document.viewport ? 'fit' : 'iso', false), 300);
+    return () => clearTimeout(timer);
   }, [props.view?.document.id, props.view?.geometry.bodies.length]);
   // Datum planes.
   const planeKey = JSON.stringify(props.planes);

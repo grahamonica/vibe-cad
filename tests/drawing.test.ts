@@ -20,6 +20,8 @@ async function bracket() {
   let v = (await store.create("Bracket")) as View;
   const run = async (name: string, args: any = {}) => {
     const t = tools.find((t) => t.name === name)!;
+    // These legacy drawing fixtures intentionally exercise the original Z-up projection.
+    if (name === "create_drawing") args = { viewConvention: "z-up", ...args };
     const r = await t.handler(
       t.schema.parse({ documentId: v.document.id, ...(t.schema.shape.expectedRevision ? { expectedRevision: v.document.revision } : {}), ...args }),
       "assistant",

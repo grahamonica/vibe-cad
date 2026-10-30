@@ -17,6 +17,8 @@ async function fixture(name: string) {
   let v = await store.create(name);
   const run = async (name: string, args: any = {}) => {
     const t = tools.find((t) => t.name === name)!;
+    // These legacy drawing fixtures intentionally exercise the original Z-up projection.
+    if (name === "create_drawing") args = { viewConvention: "z-up", ...args };
     const result = await t.handler(
       t.schema.parse({
         documentId: v.document.id,

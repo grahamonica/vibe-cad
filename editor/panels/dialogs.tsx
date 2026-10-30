@@ -150,7 +150,7 @@ export function pickLabel(view: View, p: Pick): string {
       return doc.mates?.find((m) => m.id === p.id)?.name ?? "Mate";
   }
 }
-export const principalNames: Record<string, string> = { XY: "Top plane", XZ: "Front plane", YZ: "Right plane" };
+export const principalNames: Record<string, string> = { XY: "Front plane", XZ: "Top plane", YZ: "Right plane" };
 export const planeName = (view: View, id: string) =>
   principalNames[id] ?? view.document.referencePlanes?.find((p) => p.id === id)?.name ?? "Plane";
 const round = (n: number) => Math.round(n * 100) / 100;

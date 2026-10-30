@@ -48,10 +48,10 @@ try {
   for (const name of ["create_document", "open_cad", "run_steps"]) {
     const tool = catalog.find((x) => x.name === name);
     assert.ok(visibleTools.some(t => t.name === name), `${name} must reach the model`);
-    assert.equal(tool._meta.ui.resourceUri, "ui://vibe-cad/editor.html");
+    assert.equal(tool._meta.ui.resourceUri, name === "open_cad" ? "ui://vibe-cad/editor-1.1.html" : undefined);
     assert.equal(
       tool._meta["openai/outputTemplate"],
-      "ui://vibe-cad/editor.html",
+      name === "open_cad" ? "ui://vibe-cad/editor-1.1.html" : undefined,
     );
   }
   const r = await client.callTool(
@@ -85,7 +85,10 @@ try {
   );
   assert.ok(!r.isError, JSON.stringify(r));
   assert.equal(r.structuredContent.ok, true);
-  const view = r._meta.view;
+  assert.equal(r._meta?.view, undefined);
+  const opened = await client.callTool({ name: "open_cad", arguments: { documentId: r.structuredContent.document.id } });
+  assert.ok(!opened.isError, JSON.stringify(opened));
+  const view = opened._meta.view;
   assert.ok(Math.abs(view.geometry.bodies[0].volume - 48000) < 1e-3);
   const d = view.document;
   const exported = await client.callTool({
@@ -98,7 +101,7 @@ try {
       .toString()
       .startsWith("ISO-10303-21;"),
   );
-  const ui = await client.readResource({ uri: "ui://vibe-cad/editor.html" });
+  const ui = await client.readResource({ uri: "ui://vibe-cad/editor-1.1.html" });
   assert.equal(ui.contents[0].mimeType, "text/html;profile=mcp-app");
   assert.ok(ui.contents[0].text.includes("3D CAD viewport"));
   const report = {

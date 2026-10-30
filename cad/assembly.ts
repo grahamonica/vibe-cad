@@ -1,6 +1,6 @@
 import { Euler, Quaternion, Vector3 } from "three";
 import { rotateTensor } from "./mass.ts";
-import { findTopology } from "./topology-key.ts";
+import { findTopology, topologyIndex } from "./topology-key.ts";
 import { allComponents, componentOf, type ComponentInstance, type ComponentPattern } from "./types.ts";
 import type {
   Document,
@@ -174,9 +174,11 @@ export interface MateStatus {
 /** Mate and component states, as SolidWorks shows them: (f) fixed, (-) under-defined, fully defined, (+) over-defined. */
 export interface SolveReport {
   mates: Record<string, MateStatus>;
-  components: Record<string, { status: "fixed" | "under" | "full" | "over"; dof: number }>;
+  components: Record<string, { status: "fixed" | "under" | "full" | "over"; dof: number; intentionalDof?: number; intentMismatch?: string }>;
 }
 export interface SolveOptions {
+  /** Drag projection needs satisfied mates, without a fresh Jacobian/rank report every frame. */
+  skipFreedomReport?: boolean;
   /** Filled with each mate's and component's state. */
   report?: SolveReport;
   /** Starting placements by component id (such as the previous step of a motion) instead of the stored ones. */
@@ -258,6 +260,13 @@ export function mateLoops(doc: Document): string[][] {
 export function solveComponents(doc: Document, topology: Topology[], options: SolveOptions = {}): Record<string, Placement> {
   const placements: Record<string, Placement> = {};
   const owner = new Map<string, string>();
+  // A solve probes the same references repeatedly, including finite-difference
+  // freedom checks. Index detailed imported parts once for this solve.
+  const topologyById = topologyIndex(topology);
+  const resolveTopology = (ref: TopologyRef) => {
+    const t = topologyById.get(ref.id);
+    return t && t.bodyId === ref.bodyId && t.kind === ref.kind ? t : undefined;
+  };
   for (const c of doc.components ?? []) {
     const start = options.initial?.[c.id];
     placements[c.id] = start
@@ -271,7 +280,7 @@ export function solveComponents(doc: Document, topology: Topology[], options: So
     for (const id of c.bodyIds) owner.set(id, c.id);
   }
   const refs = (ref: TopologyRef) => {
-    const t = findTopology(topology, ref);
+    const t = resolveTopology(ref);
     if (!t)
       throw Error("Mate geometry no longer resolves; reselect its references");
     const componentId = owner.get(ref.bodyId) ?? componentOf(doc, ref.bodyId)?.id;
@@ -299,6 +308,13 @@ export function solveComponents(doc: Document, topology: Topology[], options: So
   const nameOf = (id: string) => doc.components?.find((c) => c.id === id)?.name ?? id;
   /** How far a mate is from being met (radians or mm). */
   const mateError = (m: Mate, a: { t: Topology }, b: { t: Topology }, pa: Placement, pb: Placement) => {
+    if (m.type === 'limitDistance' || m.type === 'limitAngle') {
+      const value = m.type === 'limitDistance'
+        ? v(point(anchor(a.t), pa)).sub(v(point(anchor(b.t), pb))).dot(normal(b.t).applyQuaternion(q(pb)))
+        : (() => { const t=gearTurns(normal(b.t),pb,normal(a.t),pa); return wrap(t.moving-t.target)*180/Math.PI; })();
+      const error = value < m.min! ? value-m.min! : value > m.max! ? value-m.max! : 0;
+      return Math.abs(error);
+    }
     if (m.type === "gear") {
       const t = gearTurns(normal(b.t), pb, normal(a.t), pa);
       return Math.abs(wrap(gearWant(m, t.target) - t.moving));
@@ -318,6 +334,12 @@ export function solveComponents(doc: Document, topology: Topology[], options: So
   };
   /** A mate's residuals for simultaneous solving: millimeters, with directions scaled by a part-sized length. */
   const mateResidual = (m: Mate, a: { t: Topology }, b: { t: Topology }, pa: Placement, pb: Placement, size: number): number[] => {
+    if (m.type === 'limitDistance' || m.type === 'limitAngle') {
+      const value=m.type==='limitDistance' ? v(point(anchor(a.t),pa)).sub(v(point(anchor(b.t),pb))).dot(normal(b.t).applyQuaternion(q(pb)))
+        : (()=>{const t=gearTurns(normal(b.t),pb,normal(a.t),pa);return wrap(t.moving-t.target)*180/Math.PI;})();
+      const error=value<m.min!?value-m.min!:value>m.max!?value-m.max!:0;
+      return [error*(m.type==='limitAngle'?Math.PI/180*size:1)];
+    }
     if (m.type === "gear") {
       const t = gearTurns(normal(b.t), pb, normal(a.t), pa);
       return [wrap(gearWant(m, t.target) - t.moving) * size];
@@ -357,6 +379,7 @@ export function solveComponents(doc: Document, topology: Topology[], options: So
       if (a.componentId === b.componentId) throw Error("A mate must connect different components");
       if (a.componentId.includes("~") && !doc.components?.some((c) => c.id === a.componentId))
         throw Error("Pattern instances follow their source component; mate the source instead");
+      if (m.type === 'limitAngle' && (!axial(a.t) || !axial(b.t))) throw Error('Angle limits need two cylindrical faces or circular edges');
       // The kinds of geometry must suit the mate.
       mateError(m, a, b, identity(), identity());
       active.push(m);
@@ -374,7 +397,7 @@ export function solveComponents(doc: Document, topology: Topology[], options: So
   // Pattern instances are placed from their source once it and any reference it uses are settled.
   const placedPatterns = new Set<string>();
   const ownerOfRef = (ref: TopologyRef) => {
-    const t = findTopology(topology, ref);
+    const t = resolveTopology(ref);
     if (!t) throw Error("A component pattern's direction or axis no longer resolves; reselect it");
     return { t, componentId: owner.get(ref.bodyId) ?? componentOf(doc, ref.bodyId)?.id };
   };
@@ -514,6 +537,18 @@ export function solveComponents(doc: Document, topology: Topology[], options: So
           pa.position = delta.toArray() as Vec3;
           continue;
         }
+        if (m.type === 'limitDistance') {
+          const value=v(point(anchor(a.t),pa)).sub(v(point(anchor(b.t),pb))).dot(nb);
+          pa.position=v(pa.position).addScaledVector(nb,Math.max(m.min!,Math.min(m.max!,value))-value).toArray() as Vec3;
+          continue;
+        }
+        if (m.type === 'limitAngle') {
+          const t=gearTurns(normal(b.t),pb,normal(a.t),pa),value=wrap(t.moving-t.target)*180/Math.PI;
+          const delta=(Math.max(m.min!,Math.min(m.max!,value))-value)*Math.PI/180;
+          const turn=new Quaternion().setFromAxisAngle(t.axis,delta),center=v(point(anchor(a.t),pa));
+          pa.position=v(pa.position).sub(center).applyQuaternion(turn).add(center).toArray() as Vec3;
+          pa.quaternion=turn.multiply(q(pa)).normalize().toArray() as Placement['quaternion'];continue;
+        }
         if (m.type === "tangent") {
           tangentStep(m, a.t, b.t, pa, pb);
           continue;
@@ -628,7 +663,7 @@ export function solveComponents(doc: Document, topology: Topology[], options: So
     const size = 100,
       n = ids.length * 6;
     // A part's own mates, onto what it is mounted on (parts mated onto it do not hold it).
-    const list = met.filter((m) => ids.includes(sourceOf(refs(m.moving).componentId)));
+    const list = met.filter((m) => m.type !== "limitDistance" && m.type !== "limitAngle" && ids.includes(sourceOf(refs(m.moving).componentId)));
     if (!list.length) return n;
     const start = new Map(ids.map((id) => [id, placements[id]]));
     const residual = (x: number[]) => {
@@ -658,6 +693,7 @@ export function solveComponents(doc: Document, topology: Topology[], options: So
     for (const id of ids) placements[id] = start.get(id)!;
     return n - rank(columns);
   };
+  if(options.skipFreedomReport)return placements;
   for (const c of doc.components ?? []) {
     if (c.belt || c.suppressed) continue;
     const overDefined = active.some((m) => report.mates[m.id].status === "over" && refs(m.moving).componentId === c.id);
@@ -666,7 +702,9 @@ export function solveComponents(doc: Document, topology: Topology[], options: So
     else {
       const loop = loops.find((g) => g.includes(c.id));
       const dof = loop ? freedom(loop) : freedom([c.id]);
-      report.components[c.id] = { status: dof > 0 ? "under" : "full", dof };
+      const expected=c.motion?.dof;
+      report.components[c.id] = {status: expected === undefined ? (dof > 0 ? 'under' : 'full') : (expected === dof ? 'full' : 'under'), dof,
+        ...(expected!==undefined?{intentionalDof:expected,...(expected!==dof?{intentMismatch:`${c.name}: expected ${expected} movable degrees of freedom, found ${dof}`}:{})}:{})};
     }
   }
   return placements;

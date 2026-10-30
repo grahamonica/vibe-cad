@@ -18,6 +18,8 @@ const store = new Store(join(dir, "docs")),
 const ref = (t: Topology) => ({ id: t.id, bodyId: t.bodyId, kind: t.kind, geomType: t.geomType });
 async function run(documentId: string, name: string, args: any = {}): Promise<any> {
   const t = tools.find((t) => t.name === name)!;
+    // These legacy drawing fixtures intentionally exercise the original Z-up projection.
+    if (name === "create_drawing") args = { viewConvention: "z-up", ...args };
   const latest = await store.read(documentId);
   return t.handler(t.schema.parse({ documentId, ...(t.schema.shape.expectedRevision ? { expectedRevision: latest.revision } : {}), ...args }), "assistant");
 }

@@ -11,7 +11,7 @@ import { outputSchemas, viewOutput } from "./output-schemas.ts";
 import { Store } from "../cad/store.ts";
 import type { View } from "../cad/types.ts";
 import { deliverView, registerViewResources } from "./view-delivery.ts";
-export const uiUri = "ui://vibe-cad/editor.html";
+export const uiUri = "ui://vibe-cad/editor-1.1.html";
 // Keep the model catalog small enough to survive host catalog budgets. The
 // editor still has every typed operation, and run_steps validates those same
 // schemas. Specialist schemas can be requested without loading all of them.
@@ -19,22 +19,23 @@ export const modelToolNames = new Set([
   "list_documents", "create_document", "open_cad", "inspect_document",
   "inspect_geometry", "inspect_selection", "get_tool_schema", "run_steps",
   "create_sketch", "add_sketch_entity", "add_sketch_constraint", "extrude",
-  "set_dimension", "capture_view", "check_definition", "mass_properties",
-  "import_vendor_part", "export_file", "undo", "redo", "restore_history",
+  "set_dimension", "capture_view", "check_definition",
+  "import_vendor_part", "export_file", "control_build", "compact_storage",
+  "engine_info", "manage_editors", "inspect_design", "edit_design", "validate_design",
 ]);
 export function createMcp(store: Store) {
   const server = new McpServer(
-    { name: "vibe-cad", version: "1.0.0" },
+    { name: "vibe-cad", version: "1.1.0" },
     {
       instructions:
         "Local parametric CAD. Open with open_cad; build with run_steps. Use get_tool_schema for specialist operations. UI and tools share saved documents and revisions. Units: mm. Never invent topology IDs; failed edits preserve the committed model.",
     },
   );
   registerViewResources(server, store);
-  registerAppResource(server, "CAD editor", uiUri, {}, async () => ({
+  for(const resourceUri of [uiUri, "ui://vibe-cad/editor.html"]) registerAppResource(server, resourceUri===uiUri?"CAD editor":"CAD editor compatibility", resourceUri, {}, async () => ({
     contents: [
       {
-        uri: uiUri,
+        uri: resourceUri,
         mimeType: RESOURCE_MIME_TYPE,
         text: await readFile(
           process.env.VIBE_CAD_ROOT
@@ -55,6 +56,8 @@ export function createMcp(store: Store) {
     ],
   }));
   for (const tool of toolset(store)) {
+    // Editing an existing model must not open another host panel for every feature or batch.
+    const editorTool = tool.name === 'open_cad';
     registerAppTool(
       server,
       tool.name,
@@ -70,9 +73,9 @@ export function createMcp(store: Store) {
           openWorldHint: tool.openWorld ?? false,
         },
         _meta: {
-          ...(tool.ui ? { "openai/outputTemplate": uiUri } : {}),
+          ...(editorTool ? { "openai/outputTemplate": uiUri } : {}),
           ui: {
-            ...(tool.ui ? { resourceUri: uiUri } : {}),
+            ...(editorTool ? { resourceUri: uiUri } : {}),
             visibility: modelToolNames.has(tool.name) ? ["model", "app"] : ["app"],
           },
         },
@@ -125,13 +128,13 @@ export function createMcp(store: Store) {
             _meta:
               shown || download
                 ? {
-                    ...(shown && tool.ui
+                    ...(shown && editorTool
                       ? {
                           "openai/outputTemplate": uiUri,
                           ui: { resourceUri: uiUri },
                         }
                       : {}),
-                    ...(shown ? deliverView(store, view) : {}),
+                    ...(shown && (editorTool || source === 'user') ? deliverView(store, view) : {}),
                     ...(download ? { download } : {}),
                   }
                 : undefined,

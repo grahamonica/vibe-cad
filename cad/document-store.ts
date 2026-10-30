@@ -1,3 +1,5 @@
+import { EditorSessions } from "./editor-sessions.ts";
+import { definitionOf } from "./view-summary.ts";
 import { snapshot } from "./types.ts";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -6,6 +8,8 @@ import { validateDocument } from "./validate.ts";
 import { applyEquations } from "./equations.ts";
 import type { Document, Geometry, View, Preview } from "./types.ts";
 import type { Material } from "./standards.ts";
+import { trimHistory, currentDesign } from './history-policy.ts';
+import { BuildControl } from './build-control.ts';
 
 /** Converted sketch edges follow the model: keep the saved sketch in step with the rebuild. */
 function applySketchUpdates(doc: Pick<Document, "sketches">, geometry: Geometry) {
@@ -18,6 +22,9 @@ function applySketchUpdates(doc: Pick<Document, "sketches">, geometry: Geometry)
 // revision mismatch. UI and assistant commands share this state machine.
 export interface DocumentMetadata { id: string; owner: string; name: string; revision: number; updatedAt: string; bodyCount: number }
 export interface DocumentPersistence {
+  deleteDocument?(id: string, expectedRevision: number): Promise<void>;
+  listBlobs?(): Promise<string[]>;
+  deleteBlob?(hash: string): Promise<void>;
   listMetadata?(): Promise<DocumentMetadata[]>;
   readonly directory: string;
   /** "project" when designs are git-friendly folders in a workspace. */
@@ -33,10 +40,25 @@ export interface DocumentPersistence {
   writeLibrary?(name: string, value: unknown): Promise<void>;
 }
 export class DocumentStore {
+  readonly buildControl = new BuildControl();
+  readonly editors = new EditorSessions();
   readonly directory: string;
   private locks = new Map<string, Promise<unknown>>();
   private previews = new Map<string, Preview>();
   private cache = new Map<string, { revision: number; links: string; geometry: Geometry }>();
+  private remember(id: string, entry: { revision: number; links: string; geometry: Geometry }) {
+    this.cache.delete(id);
+    this.cache.set(id, entry);
+    const size = (g: Geometry) => g.bodies.reduce((n, b) => n +
+      (b.mesh.vertices.length + b.mesh.normals.length + b.mesh.triangles.length + b.edges.lines.length) * 8 + b.topology.length * 256, 0);
+    let bytes = [...this.cache.values()].reduce((n, e) => n + size(e.geometry), 0);
+    for (const [key, value] of this.cache) {
+      if (this.cache.size <= 3 && bytes <= 48 * 1024 * 1024) break;
+      if (key === id) continue;
+      bytes -= size(value.geometry); this.cache.delete(key); this.previews.delete(key);
+    }
+  }
+  clearCaches() { this.cache.clear(); this.previews.clear(); }
   constructor(
     private readonly persistence: DocumentPersistence,
     private readonly build: (doc: Document) => Promise<Geometry>,
@@ -198,7 +220,7 @@ export class DocumentStore {
     doc.history.push({ id: this.uuid(), revision: 1, at: doc.updatedAt, description, source, snapshot: snapshot(doc) });
     doc.historyIndex = 1;
     await this.persistence.commit(doc, null);
-    this.cache.set(doc.id, { revision: doc.revision, links, geometry });
+    this.remember(doc.id, { revision: doc.revision, links, geometry });
     return this.view(doc);
   }
   async create(
@@ -210,7 +232,7 @@ export class DocumentStore {
     validateDocument(doc);
     const { geometry, links } = await this.rebuild(doc);
     await this.persistence.commit(doc, null);
-    this.cache.set(doc.id, { revision: doc.revision, links, geometry });
+    this.remember(doc.id, { revision: doc.revision, links, geometry });
     return this.view(doc);
   }
   private blank(name: string, owner: string, source: "user" | "assistant") {
@@ -247,16 +269,12 @@ export class DocumentStore {
   async view(doc: Document): Promise<View> {
     const cached = this.cache.get(doc.id);
     // An assembly is current only while every inserted part is at the revision it was built from.
-    const full = await this.kernelDocument(doc);
-    const links = Object.values(full.linked ?? {})
-      .map((d) => `${d.id}@${d.revision}`)
-      .sort()
-      .join(",");
-    const geometry =
-      cached?.revision === doc.revision && cached.links === links
-        ? cached.geometry
-        : await this.build(full);
-    this.cache.set(doc.id, { revision: doc.revision, links, geometry });
+    // Check cheap dependency revisions before loading imported bytes or invoking OCCT.
+    const linked = await this.linkedDocuments(doc);
+    const links = Object.values(linked).map(d => `${d.id}@${d.revision}`).sort().join(',');
+    const geometry = cached?.revision === doc.revision && cached.links === links
+      ? cached.geometry : await this.build(await this.kernelDocument(doc));
+    this.remember(doc.id, { revision: doc.revision, links, geometry });
     // Show converted edges where the model has them, even before the next save.
     const sketches = geometry.sketchUpdates ? structuredClone(doc.sketches) : doc.sketches;
     if (geometry.sketchUpdates) applySketchUpdates({ sketches }, geometry);
@@ -268,7 +286,7 @@ export class DocumentStore {
           ({ snapshot: _, ...entry }) => entry,
         ) as Document["history"],
       },
-      geometry,
+      geometry: { ...geometry, dependencyKey: links },
       preview:
         this.previews.get(doc.id)?.baseRevision === doc.revision
           ? (({ snapshot: _, ...preview }) => preview)(
@@ -286,7 +304,19 @@ export class DocumentStore {
       selection: doc.selection,
       viewport: doc.viewport,
       previewId: preview?.baseRevision === doc.revision ? preview.id : null,
+      dependencyKey: Object.values(await this.linkedDocuments(doc)).map(d => `${d.id}@${d.revision}`).sort().join(','),
     };
+  }
+  async validateEdit(id: string, expectedRevision: number, edit: (d: Document) => void, level: 'structure' | 'geometry') {
+    const current = await this.read(id);
+    if (current.revision !== expectedRevision) throw Error('Revision conflict; inspect the design again');
+    const draft = structuredClone(current), started = performance.now();
+    edit(draft); applyEquations(draft); validateDocument(draft);
+    if (level === 'structure') return {valid: true, level, revision: current.revision,
+      sketches: draft.sketches.map(s => ({id:s.id,dof:s.solver.dof})),
+      assembly: {status: 'not_checked', reason: 'Mate definition requires actual topology; use geometry validation'}, milliseconds: performance.now()-started};
+    const {geometry} = await this.rebuild(draft);
+    return {valid:true, level, revision:current.revision, definition:definitionOf({document:draft,geometry}), milliseconds:performance.now()-started};
   }
   async preview(
     id: string,
@@ -455,11 +485,11 @@ export class DocumentStore {
         source,
         snapshot: snapshot(next),
       });
-      if (next.history.length > 200) next.history.shift();
       next.historyIndex = next.history.length - 1;
+      trimHistory(next);
       await this.persistence.commit(next, doc.revision);
       this.previews.delete(id);
-      this.cache.set(id, { revision: next.revision, links, geometry });
+      this.remember(id, { revision: next.revision, links, geometry });
       return this.view(next);
     });
   }
@@ -513,7 +543,7 @@ export class DocumentStore {
       applySketchUpdates(next, geometry);
       await this.persistence.commit(next, doc.revision);
       this.previews.delete(id);
-      this.cache.set(id, { revision: next.revision, links, geometry });
+      this.remember(id, { revision: next.revision, links, geometry });
       return this.view(next);
     });
   }
@@ -526,21 +556,84 @@ export class DocumentStore {
     const doc = await this.read(id, owner),
       entry = doc.history.find((h) => h.id === historyId);
     if (!entry) throw Error("History entry not found");
+    return this.restoreSnapshot(id, expectedRevision, entry.snapshot, `Restored: ${entry.description}`, owner);
+  }
+  async restoreSnapshot(id: string, expectedRevision: number, state: ReturnType<typeof snapshot>, reason: string, owner = 'local') {
     return this.transact(
       id,
       expectedRevision,
-      `Restored: ${entry.description}`,
+      reason,
       "assistant",
       (d) => {
-        Object.assign(d, structuredClone(entry.snapshot));
-        if (!entry.snapshot.material) delete d.material;
-        if (!entry.snapshot.units) delete d.units;
-        if (entry.snapshot.massOverride === undefined) delete d.massOverride;
-        if (entry.snapshot.weightLimit === undefined) delete d.weightLimit;
-        d.componentPatterns = structuredClone(entry.snapshot.componentPatterns ?? []);
-        d.variables = structuredClone(entry.snapshot.variables ?? []);
+        Object.assign(d, structuredClone(state));
+        if (!state.material) delete d.material;
+        if (!state.units) delete d.units;
+        if (state.massOverride === undefined) delete d.massOverride;
+        if (state.weightLimit === undefined) delete d.weightLimit;
+        d.componentPatterns = structuredClone(state.componentPatterns ?? []);
+        d.variables = structuredClone(state.variables ?? []);
       },
       owner,
     );
+  }
+
+  /** Explicitly scoped maintenance. Other saved projects and their undo references remain protected. */
+  async compactStorage(roots: string[], candidates: string[], dryRun = true) {
+    type Refs = { revision: number; components: Document['components']; features: Document['features']; history: { snapshot: { components: Document['components']; features: Document['features'] } }[] };
+    const docs = new Map<string, Refs>();
+    const heads = this.persistence.listMetadata ? await this.persistence.listMetadata() : await this.persistence.list();
+    const refs = (d: Pick<Document, 'components' | 'features'>) => ({ components: d.components, features: d.features.filter(f => f.type === 'import') });
+    for (const head of heads) {
+      const d = await this.read(head.id);
+      docs.set(d.id, { revision: d.revision, ...refs(d), history: d.history.map(h => ({ snapshot: refs(h.snapshot) })) });
+    }
+    for (const id of roots) if (!docs.has(id)) throw Error(`Root document ${id} not found`);
+    const eligible = new Set(candidates), live = new Set<string>();
+    const visit = (id: string, history: boolean) => {
+      if (live.has(id)) return;
+      const d = docs.get(id); if (!d) throw Error(`Referenced document ${id} not found; cleanup refused`);
+      live.add(id);
+      for (const state of history ? [d, ...d.history.map(h => h.snapshot)] : [d])
+        for (const c of state.components ?? []) if (c.source) visit(c.source.documentId, history);
+    };
+    // Non-candidates may be unrelated user projects; preserve their full dependency graph.
+    for (const id of docs.keys()) if (!eligible.has(id) && !roots.includes(id)) visit(id, true);
+    const compact = new Set<string>();
+    const active = (id: string) => {
+      if (compact.has(id)) return;
+      const d = docs.get(id); if (!d) throw Error(`Missing active part ${id}; cleanup refused`);
+      compact.add(id); live.add(id);
+      for (const c of d.components ?? []) if (c.source) active(c.source.documentId);
+    };
+    roots.forEach(active);
+    const removed = [...eligible].filter(id => docs.has(id) && !live.has(id));
+    const compacted = [...compact].filter(id => roots.includes(id) || eligible.has(id));
+    // Blobs referenced by any retained document/history survive.
+    const blobRefs = new Set<string>();
+    for (const [id, d] of docs) {
+      if (removed.includes(id)) continue;
+      const states = compacted.includes(id) ? [d] : [d, ...d.history.map(h => h.snapshot)];
+      for (const s of states) for (const f of s.features)
+        if (f.type === 'import') blobRefs.add(String(f.params.blob));
+    }
+    const scopedBlobs = new Set<string>();
+    for (const id of new Set([...roots, ...candidates, ...compacted])) {
+      const d = docs.get(id); if (!d) continue;
+      for (const state of [d, ...d.history.map(h => h.snapshot)])
+        for (const f of state.features) if (f.type === 'import') scopedBlobs.add(String(f.params.blob));
+    }
+    const unusedBlobs = (await this.persistence.listBlobs?.() ?? []).filter(hash => scopedBlobs.has(hash) && !blobRefs.has(hash));
+    if (!dryRun) {
+      if (removed.length && !this.persistence.deleteDocument) throw Error('Storage cannot delete unused documents');
+      for (const id of compacted) await this.locked(id, async () => {
+        const latest = await this.read(id);
+        if (latest.revision !== docs.get(id)!.revision) throw Error('Design changed during cleanup; retry');
+        await this.persistence.commit(currentDesign(latest), latest.revision);
+      });
+      for (const id of removed) await this.persistence.deleteDocument!(id, docs.get(id)!.revision);
+      for (const hash of unusedBlobs) await this.persistence.deleteBlob?.(hash);
+      this.clearCaches();
+    }
+    return { dryRun, compacted, removed, unusedBlobs };
   }
 }

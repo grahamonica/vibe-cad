@@ -25,6 +25,8 @@ const mateTypes = [
   { value: "perpendicular", label: "Perpendicular" },
   { value: "tangent", label: "Tangent" },
   { value: "angle", label: "Angle" },
+  { value: "limitDistance", label: "Limit distance" },
+  { value: "limitAngle", label: "Limit angle" },
   { value: "lock", label: "Lock" },
 ] as const;
 const componentOf = (view: View, bodyId: string) => owner(view.document, bodyId);
@@ -209,6 +211,7 @@ function MateDialog({ ctx }: { ctx: DialogContext }) {
   const [refs, setRefs] = useState<Pick[]>(ctx.initial.filter((p) => p.kind === "face" || p.kind === "edge").slice(0, 2));
   const [type, setType] = useState<string>("coincident"),
     [value, setValue] = useState(0),
+    [minimum,setMinimum]=useState(0),[maximum,setMaximum]=useState(30),
     [flip, setFlip] = useState(false),
     [ratio, setRatio] = useState<number | null>(null),
     [sameWay, setSameWay] = useState(false);
@@ -237,7 +240,7 @@ function MateDialog({ ctx }: { ctx: DialogContext }) {
   // A cylinder against a plane suggests tangency.
   const rolling = refs.length === 2 && refs.filter(isRound).length === 1 && refs.some((p) => topo(p)?.geomType === "PLANE");
   useEffect(() => {
-    if (round) setType((t) => (t === "gear" ? t : "concentric"));
+    if (round) setType((t) => (["gear","limitAngle"].includes(t) ? t : "concentric"));
     else if (rolling) setType("tangent");
     else if (type === "concentric" || type === "tangent" || type === "gear") setType("coincident");
   }, [round, rolling]);
@@ -262,6 +265,7 @@ function MateDialog({ ctx }: { ctx: DialogContext }) {
         tool: "add_mate",
         arguments: {
           type,
+          ...(['limitDistance','limitAngle'].includes(type)?{min:minimum,max:maximum}:{}),
           moving: strip((moving as any).ref as TopologyRef),
           target: strip((target as any).ref as TopologyRef),
           value: type === "distance" || type === "angle" ? value : type === "gear" ? gearRatio : 0,
@@ -288,6 +292,7 @@ function MateDialog({ ctx }: { ctx: DialogContext }) {
             </button>
           ))}
         </div>
+        {['limitDistance','limitAngle'].includes(type)&&<><NumberField label="Minimum travel" value={minimum} onChange={setMinimum} unit={type==='limitAngle'?'°':'mm'}/><NumberField label="Maximum travel" value={maximum} onChange={setMaximum} unit={type==='limitAngle'?'°':'mm'}/></>}
         {type === "distance" && <NumberField label="Distance" value={value} onChange={setValue} />}
         {type === "angle" && <NumberField label="Angle" unit="°" value={value} min={0} max={180} onChange={setValue} />}
         {type !== "lock" && type !== "gear" && <Check label="Flip alignment" value={flip} onChange={setFlip} />}
@@ -835,6 +840,10 @@ export function AssemblyInspector({
               </button>
             )}
             {!component.belt && <Check label="Fixed" value={component.grounded} disabled={!!mated} onChange={(grounded) => void cad.run("set_component_grounded", { componentId: component.id, grounded })} />}
+            {!component.belt&&!component.grounded&&<section>
+              <Check label="Intended motion" value={component.motion!==undefined} onChange={on=>void cad.run('set_component_motion',{componentId:component.id,dof:on?1:null})}/>
+              {component.motion&&<NumberField label="Intended freedoms" unit="" min={0} max={6} step={1} value={component.motion.dof} onChange={n=>void cad.run('set_component_motion',{componentId:component.id,dof:Math.round(n)})}/>}
+            </section>}
             <section>
               <h4>Display</h4>
               <AppearanceFields

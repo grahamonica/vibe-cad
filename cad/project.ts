@@ -13,6 +13,7 @@ import type { DocumentPersistence } from "./document-store.ts";
 import type { Document, HistoryEntry, Snapshot } from "./types.ts";
 import { snapshot } from "./types.ts";
 import { collections, designFiles, readDesign } from "./project-format.ts";
+import { trimHistory } from './history-policy.ts';
 
 interface LocalState {
   revision: number;
@@ -124,8 +125,8 @@ export class ProjectPersistence implements DocumentPersistence {
         snapshot: snapshot(doc({ ...next, historyIndex: 0 })) as Snapshot,
       };
       next.history.push(entry);
-      if (next.history.length > 200) next.history.shift();
       next.historyIndex = next.history.length - 1;
+      trimHistory(next);
       await this.ensureLocal();
       await writeAtomic(this.local("state", `${id}.json`), JSON.stringify(next));
       state = next;
@@ -208,6 +209,15 @@ export class ProjectPersistence implements DocumentPersistence {
   }
   async getBlob(hash: string) {
     return new Uint8Array(await readFile(this.blob(hash)));
+  }
+  async listBlobs() { return (await readdir(join(this.directory, 'blobs')).catch(() => [])).filter(n => /^[0-9a-f]{64}$/.test(n)); }
+  async deleteBlob(hash: string) { await rm(this.blob(hash), { force: true }); }
+  async deleteDocument(id: string, expectedRevision: number) {
+    if ((await this.read(id)).revision !== expectedRevision) throw Error('Document changed during cleanup');
+    const folder = (await this.folders()).get(id);
+    if (!folder) throw Error('Document not found');
+    await rm(join(this.directory, folder), { recursive: true });
+    await rm(this.local('state', `${id}.json`), { force: true });
   }
   private library(name: string) {
     if (!/^[a-z-]{1,40}$/.test(name)) throw Error("Invalid library name");

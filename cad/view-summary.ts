@@ -14,7 +14,7 @@ export function definitionOf(view: View) {
   const sketches = d.sketches.map((s) => ({ id: s.id, name: s.name, dof: s.solver.dof, status: s.solver.dof > 0 ? ("under" as const) : ("full" as const) }));
   const components = (d.components ?? []).flatMap((c) => {
     const state = componentStatus[c.id];
-    return state ? [{ id: c.id, name: c.name, status: state.status, dof: state.dof }] : [];
+    return state ? [{ id: c.id, name: c.name, status: state.status, dof: state.dof, intentionalDof: state.intentionalDof, intentMismatch: state.intentMismatch }] : [];
   });
   // What a flagged mate's references are, where the model now has them: enough to see why it cannot be met.
   const topology = view.geometry.bodies.flatMap((b) => b.topology);
@@ -54,7 +54,7 @@ export function definitionOf(view: View) {
   const notes = [
     ...mates.map((m) => m.message),
     ...sketches.filter((s) => s.status === "under").map((s) => `${s.name} is under-defined: ${s.dof} degree${s.dof === 1 ? "" : "s"} of freedom`),
-    ...components.filter((c) => c.status === "under").map((c) => `${c.name} is under-defined: ${c.dof} degree${c.dof === 1 ? "" : "s"} of freedom`),
+    ...components.filter((c) => c.status === "under").map((c) => c.intentMismatch ?? `${c.name} is under-defined: ${c.dof} degree${c.dof === 1 ? "" : "s"} of freedom`),
   ];
   const over = mates.length > 0 || components.some((c) => c.status === "over");
   const under = sketches.some((s) => s.status === "under") || components.some((c) => c.status === "under");

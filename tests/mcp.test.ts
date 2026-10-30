@@ -27,7 +27,7 @@ test("MCP handshake, typed tools, annotations, self-contained UI resource, mutat
       del = result.tools.find((t) => t.name === "delete_feature")!;
     assert.equal(get.annotations?.readOnlyHint, true);
     assert.equal(create.annotations?.destructiveHint, false);
-    assert.equal((create._meta?.ui as any).resourceUri, uiUri);
+    assert.equal((create._meta?.ui as any).resourceUri, undefined);
     assert.equal(del.annotations?.destructiveHint, true);
     assert.ok(get.outputSchema);
     assert.ok(result.tools.every((t) => t.inputSchema && t.outputSchema));
@@ -59,7 +59,7 @@ test("MCP handshake, typed tools, annotations, self-contained UI resource, mutat
     assert.equal(
       (result.tools.find((t) => t.name === "run_steps")!._meta!.ui as any)
         .resourceUri,
-      uiUri,
+      undefined,
     );
     assert.equal(
       result.tools.find((t) => t.name === "open_cad")!._meta![
@@ -72,8 +72,10 @@ test("MCP handshake, typed tools, annotations, self-contained UI resource, mutat
       arguments: { name: "MCP model" },
     });
     assert.ok(!doc.isError);
-    assert.equal(doc._meta?.["openai/outputTemplate"], uiUri);
+    assert.equal(doc._meta?.["openai/outputTemplate"], undefined);
     const id = (doc.structuredContent as any).document.id;
+    const opened = await client.callTool({ name: "open_cad", arguments: { documentId: id } });
+    assert.equal(opened._meta?.["openai/outputTemplate"], uiUri);
     const badVector = await client.callTool({
       name: "create_sketch",
       arguments: { documentId: id, expectedRevision: 0, plane: "XY", origin: [0, 0] },
@@ -87,7 +89,7 @@ test("MCP handshake, typed tools, annotations, self-contained UI resource, mutat
     assert.equal((sketch.structuredContent as any).document.revision, 1);
     assert.ok((sketch._meta?.view as any).geometry);
     assert.equal(
-      (doc._meta?.view as any).document.history.at(-1).source,
+      (opened._meta?.view as any).document.history.at(-1).source,
       "assistant",
     );
     assert.equal(
@@ -135,7 +137,9 @@ test("MCP handshake, typed tools, annotations, self-contained UI resource, mutat
     });
     assert.ok(!batch.isError, JSON.stringify(batch));
     assert.equal((batch.structuredContent as any).ok, true);
-    const embedded = batch._meta?.view as any;
+    assert.equal(batch._meta?.view, undefined, "assistant batches do not open or retain another editor snapshot");
+    const refreshed = await client.callTool({ name: "inspect_document", arguments: { documentId: id }, _meta: { "vibe-cad/source": "user" } });
+    const embedded = refreshed._meta?.view as any;
     assert.equal(embedded.document.id, id);
     assert.equal(embedded.document.sketches.at(-1).name, "Embedded sketch");
     const saved = await client.callTool({

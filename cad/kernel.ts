@@ -1,6 +1,7 @@
 import init from "replicad-opencascadejs";
 import {importColoredStep} from "./step-appearance.ts";
 import { STL_TRIANGLE_LIMIT, stlTriangleCount } from "./stl.ts";
+import { trimActiveCache } from "./active-cache.ts";
 import { eigenvalues, type Tensor } from "./mass.ts";
 import { axesFor } from "./frame.ts";
 import { defaultPrintWall, printedMass } from "./standards.ts";
@@ -2314,10 +2315,13 @@ export async function buildModel(doc: Document): Promise<Build> {
               cached = {shape:solids.length === 1 ? solids[0].clone() : (r.makeCompound(solids.map((x) => x.clone())) as unknown as r.Shape3D),colors};
               shape.delete();
               importCache.set(key, cached);
-              for (const old of [...importCache.keys()].slice(0, Math.max(0, importCache.size - 8))) {
-                importCache.get(old)!.shape.delete();
-                importCache.delete(old);
-              }
+              // A working assembly can legitimately use more than eight vendor
+              // imports. Evicting its first part while loading its last causes
+              // every subsequent edit to reparse the entire assembly.
+              const active = new Set([doc, ...Object.values(doc.linked ?? {})].flatMap(d => d.features
+                .filter(f => f.type === "import")
+                .map(f => `${f.params.blob}:${f.params.format ?? "step"}:${f.params.scale ?? 1}`)));
+              trimActiveCache(importCache, active, 8, entry => entry.shape.delete());
             } else {
               importCache.delete(key);
               importCache.set(key, cached);
@@ -2833,7 +2837,11 @@ async function partGeometry(source: Document) {
   if (!geometry) {
     geometry = await rebuild(source);
     instanceGeometry.set(key, geometry);
-    if (instanceGeometry.size > 32) instanceGeometry.delete(instanceGeometry.keys().next().value!);
+    const active = new Set([key, ...Object.values(source.linked ?? {}).map(d => linkKey(d, source.linked))]);
+    trimActiveCache(instanceGeometry, active, 32);
+  } else {
+    instanceGeometry.delete(key);
+    instanceGeometry.set(key, geometry);
   }
   return geometry;
 }
@@ -3685,7 +3693,7 @@ export async function renderDrawing(doc: Document, drawingId: string, format: "s
           flatViews.set(flatKey, flat);
           if (flatViews.size > 16) flatViews.delete(flatViews.keys().next().value!);
         }
-        inputs.push({ view: v, camera: cameraFor("top"), scale, ...flat });
+        inputs.push({ view: v, camera: cameraFor("front"), scale, ...flat });
         continue;
       }
       let camera: ViewCamera;
@@ -3713,7 +3721,7 @@ export async function renderDrawing(doc: Document, drawingId: string, format: "s
           camera = { dir, x, y };
         }
         cut = { origin: A, normal: look };
-      } else camera = cameraFor(v.orientation ?? "front");
+      } else camera = cameraFor(v.orientation ?? "front", sheet.viewConvention ?? 'z-up');
       const cacheKey = `${key}|${JSON.stringify(camera)}|${v.exploded ? 1 : 0}|${JSON.stringify(cut ?? null)}`;
       let projection = projectionCache.get(cacheKey);
       if (!projection) {

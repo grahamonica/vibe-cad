@@ -41,7 +41,7 @@ test('a local project reopens parametric parts, imported originals, assembly mat
   const drawing=await edit(assemblyId,'create_drawing',{name:'Assembly drawing',size:'A4',orientation:'landscape',bodyIds:inserted.geometry.bodies.map((b:any)=>b.id)});
   const sheetId=drawing.document.drawings[0].id;
   await edit(assemblyId,'add_drawing_view',{drawingId:sheetId,kind:'base',orientation:'front',position:[90,100],scale:0.5});
-  const text=await exportProject(store,assemblyId),saved=unpackProject(text);
+  const text=await exportProject(store,assemblyId,true),saved=unpackProject(text);
   assert.equal(JSON.parse(text).format,'vibe-cad-project/1');
   assert.equal(Object.keys(saved.documents).length,3);
   assert.deepEqual(saved.blobs[imported.document.features[0].params.blob],original.bytes);

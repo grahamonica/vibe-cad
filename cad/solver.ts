@@ -680,8 +680,10 @@ export interface SolveOptions {
 }
 
 export function solveSketch(s: Sketch, options: SolveOptions = {}): void {
-  if (s.entities.length > 300 || s.constraints.length > 600)
-    throw Error("Sketch exceeds 300 entities or 600 constraints");
+  const fixedIds=new Set(s.constraints.filter(c=>c.type==='fixed'&&!c.driven).map(c=>c.entityIds[0]));
+  const fixedArtwork=s.purpose==='artwork' && s.entities.every(e=>e.projected||fixedIds.has(e.id));
+  if (s.entities.length > (fixedArtwork?600:300) || s.constraints.length > (fixedArtwork?1200:600))
+    throw Error('Sketch exceeds its entity/constraint budget (600 fixed artwork entities; 300 functional entities)');
   for (const c of s.constraints) validateConstraint(s, c);
   const lookup = new Map(s.entities.map((e) => [e.id, e]));
   const blocks: Block[] = [];
@@ -726,6 +728,13 @@ export function solveSketch(s: Sketch, options: SolveOptions = {}): void {
     const vars = group.entities
       .filter((e) => !e.projected)
       .flatMap((e) => fieldsOf(e).map((key) => ({ e, key })));
+    if (group.entities.every(e=>e.projected||fixedIds.has(e.id))) {
+      for(const c of s.constraints.filter(c=>c.type==='fixed'&&!c.driven&&group.entities.some(e=>e.id===c.entityIds[0]))) {
+        const e=lookup.get(c.entityIds[0])!;fieldsOf(e).forEach((key,i)=>e.values[key]=c.reference![i]);
+      }
+      const values=evaluate(group.blocks);worst=Math.max(worst,...values.map(Math.abs));
+      redundant+=Math.max(0,values.length-vars.length);continue;
+    }
     if (drag && group.entities.includes(drag)) {
       const target = options.drag!.target,
         anchor = options.drag!.anchor;

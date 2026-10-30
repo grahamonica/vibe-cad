@@ -19,9 +19,35 @@ Use the installed local `vibe-cad` connection (`mcp__vibe_cad__*`). The former *
 
 ## Show the interactive editor in chat
 
-The interactive editor is the primary user interface. Call `open_cad` with the saved document's ID to display it in a host that supports MCP Apps. `run_steps` also declares the editor resource and delivers its final document to the embedded editor. The editor and tools share the saved model, revisions, selection and history.
+The interactive editor is the primary user interface. Call `open_cad` with the saved document's ID to display it in a host that supports MCP Apps. Use `open_cad` once for the working assembly; `run_steps` saves edits without opening another host panel, and the existing editor follows saved changes. The editor and tools share the saved model, revisions, selection and history.
 
 Use native Vibe CAD tools to display this resource; running an MCP client through a shell does not make the chat host render an app. Do not replace the requested interactive editor with a screenshot or an external browser. If the host has not loaded the plugin or cannot render its resource, report that specific integration gap. Local iframe verification does not prove native Codex rendering.
+
+### Keep the working set small
+
+Reuse one assembly editor while building linked parts. Only `open_cad` should open another editor panel; ordinary edits and `run_steps` update the existing editor through its shared document. Aim for at most five open CAD panels, never more than ten. Use `manage_editors` to list panels at least every ten tool calls and before opening another editor; use `close_others` with the working assembly documentId to retire saved, unused panels. The UI also provides Close editor and Close other editors. Drafts are protected, and retired editors dispose their renderer and request host teardown. If the host exposes no close operation, report that limit instead of claiming tabs were closed. Do not open every part just to inspect it.
+
+Prefer simple fastener solids and single-sketch landscape layers. Avoid detailed threads unless needed for an interface. Never repeatedly launch whole-assembly booleans after the kernel reports a timeout. Use scoped checks, inspected dimensions and explicitly stated validation limits.
+
+Use `control_build` to inspect, pause, resume or stop an active batch. Pause becomes effective at a step boundary; Stop keeps committed steps and cancels the current kernel operation. After manual edits during a pause, inspect the current revision and re-plan; do not replay the old plan over the user's edits. Move part and Rotate part project each drag through the actual mates using cached topology, including linear sliders, rotations, planar movement, coupled followers and limits. No extra hidden joint constrains the model.
+
+Treat incoming user messages as steering of the current design. Use short batches of at most ten operations when the user is actively co-designing, inspect the current revision after steering, and avoid starting a long batch immediately after a correction. The host controls chat delivery: Settings > General > Follow-up behavior > Steer sends messages into the current run; a plugin cannot change Queue into Steer. Pause/Stop in the editor remains available while a kernel operation is running; Pause waits for a step boundary.
+
+Current `.edit` exports retain the feature tree and current linked parts by default; obsolete undo states are omitted. Set `includeHistory` only for an explicitly needed history archive. Undo is bounded to 24 entries and a memory budget. Use `compact_storage` with a specific root assembly and explicit candidate document IDs to preview cleanup, then apply cleanup within the user's authorized scope. Preserve other projects and their references. Do not rewrite Git history or delete unrelated library parts. Generated caches and local history belong outside version control. Preserve the directory referenced by the local marketplace source.path, even when it is under dist; it is the plugin source required for reloads.
+
+View convention: Y is up, Front is XY viewed from +Z, Top is XZ viewed from +Y. Mathematical sketch planes and existing feature geometry are unchanged.
+
+## Fast edits and sculpted artwork
+
+Start with `engine_info` after a plugin update; the running version must be 1.1.0 or later before relying on these tools. An installed package does not update an already running stdio process.
+
+Use `inspect_design` for lightweight authoritative JSON: sketches, dimensions, variables, features, placements and mates, without meshes, imported bytes or undo copies. Request current linked designs only when useful. Use `edit_design` to replace an existing sketch or change many numeric parameters/variables/poses atomically with one solve/rebuild. Feature IDs remain stable; invalid edits preserve the previous revision. Use ordinary typed tools to create features and actual geometry selectors to pick topology. Never edit saved CAD files through a shell.
+
+`validate_design` tests JSON without saving. Structure validation checks equations and sketch definition without OCCT; it explicitly does not certify assembly mates. Geometry validation rebuilds actual solids and reports mate conflicts and definition. Do not equate schema-valid JSON with a physically correct assembly or interference-free motion.
+
+Fixed points and fixed entities are available through sketch constraints. Use them sparingly for functional designs: fixing an origin or reference datum is useful, but mating holes, slots, tab dimensions, clearances and mechanical profiles should use driving dimensions, variables and geometric relations. Do not blanket-fix functional components just to silence under-definition.
+
+For decorative illustrations such as the Yosemite silhouettes, set the sketch purpose to artwork and explicitly freeze the outline with edit_design. This keeps organic curves without hundreds of meaningless dimensions. Separate dimensioned mounting/tab/slot geometry from the artwork. Prefer native smooth splines/arcs and a compact set of intentional contours over thousands of traced micro-segments or repeated stock symbols. Fixed artwork supports up to 600 entities; this is a ceiling, not a target. Review feature widths and webs against the chosen sheet stock. Keep each landscape layer as one connected manufactured part.
 
 ## Build with `run_steps`
 
@@ -80,7 +106,8 @@ Use `capture_view` to inspect geometry or provide a static image. Keep the inter
 ## Definition and mate conflicts
 
 - **Sketches.** A sketch with degrees of freedom left is under-defined. Add dimensions or relations until `check_definition` reports it fully defined.
-- **Assembly parts.** Parts are shown as fixed, under-defined (with their degrees of freedom), fully defined or over-defined. A linkage is meant to keep one degree of freedom.
+- **Assembly parts.** Actual mates determine all motion. Use `set_component_motion` to declare the intended remaining DOF count; this declaration adds no constraint. A mechanism is fully defined when the measured DOF count matches the declared intent, while preserving that motion. Extra or missing freedoms remain a failed definition check. Do not declare arbitrary freedoms to hide incomplete mates.
+- **Travel limits.** `limitDistance` bounds signed travel along the target plane normal/axis in mm; `limitAngle` bounds signed relative rotation about cylindrical/circular axes in degrees (-180 to 180). Both require min < max, and limit mates do not consume the permitted DOF at a stop. Use geometry mates to define a slider/hinge first; limits alone do not locate it. Unbounded continuous rotation needs no angle-limit mate.
 - **Over-defining mates.** A mate that over-defines a part is flagged `over` and left unsolved, and its message names the mates it conflicts with. Delete or change one of them.
 - **Broken mates.** A mate whose geometry is gone is flagged `error`. Re-pick its faces.
 - **Understanding a conflict.** `check_definition` describes each flagged mate:
