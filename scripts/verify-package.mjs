@@ -49,10 +49,10 @@ try {
   for (const name of ["create_document", "open_cad", "run_steps"]) {
     const tool = catalog.find((x) => x.name === name);
     assert.ok(visibleTools.some(t => t.name === name), `${name} must reach the model`);
-    assert.equal(tool._meta.ui.resourceUri, name === "open_cad" ? "ui://vibe-cad/editor-1.1.5.html" : undefined);
+    assert.equal(tool._meta.ui.resourceUri, name === "open_cad" ? "ui://vibe-cad/editor-1.1.6.html" : undefined);
     assert.equal(
       tool._meta["openai/outputTemplate"],
-      name === "open_cad" ? "ui://vibe-cad/editor-1.1.5.html" : undefined,
+      name === "open_cad" ? "ui://vibe-cad/editor-1.1.6.html" : undefined,
     );
   }
   // Reproduce a plugin update removing an old installation while its stdio
@@ -105,7 +105,7 @@ try {
       .toString()
       .startsWith("ISO-10303-21;"),
   );
-  const ui = await client.readResource({ uri: "ui://vibe-cad/editor-1.1.5.html" });
+  const ui = await client.readResource({ uri: "ui://vibe-cad/editor-1.1.6.html" });
   assert.equal(ui.contents[0].mimeType, "text/html;profile=mcp-app");
   assert.ok(ui.contents[0].text.includes("3D CAD viewport"));
   const report = {

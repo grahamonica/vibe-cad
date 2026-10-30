@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Store } from "../cad/store.ts";
 import type { View } from "../cad/types.ts";
+import { packDisplayBody } from "../cad/view-wire.ts";
 
 // Large vendor assemblies cannot fit in one MCP message. Pin the exact result
 // snapshot and deliver it losslessly through bounded, app-readable resources.
@@ -22,8 +23,9 @@ function cache(store: Store) {
   return entries;
 }
 export function deliverView(store: Store, view: View): Record<string, unknown> {
-  const json = JSON.stringify(view);
-  if (Buffer.byteLength(json) <= 256 * 1024) return { view };
+  const values = view.geometry.bodies.reduce((n, body) => n + body.mesh.vertices.length + body.mesh.normals.length + body.mesh.triangles.length + body.edges.lines.length, 0);
+  // Do not first allocate a full decimal JSON copy of a known-large mesh.
+  if (values < 32768 && Buffer.byteLength(JSON.stringify(view)) <= 256 * 1024) return { view };
   const header = { ...view, geometry: { ...view.geometry, bodies: [] } };
   const records =
     [
@@ -33,7 +35,7 @@ export function deliverView(store: Store, view: View): Record<string, unknown> {
         bodyCount: view.geometry.bodies.length,
       }),
       ...view.geometry.bodies.map((body) =>
-        JSON.stringify({ type: "body", body }),
+        JSON.stringify({ type: "body", body: packDisplayBody(body, bytes => Buffer.from(bytes).toString("base64")) }),
       ),
       JSON.stringify({ type: "complete" }),
     ].join("\n") + "\n";

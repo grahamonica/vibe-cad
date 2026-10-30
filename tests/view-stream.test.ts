@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createDeflate, deflateSync, constants } from "node:zlib";
 import { receiveView } from "../editor/view-stream.ts";
 import type { View } from "../cad/types.ts";
+import { packDisplayBody } from "../cad/view-wire.ts";
 const bodies = [
   {
     id: "component-1/body",
@@ -14,12 +15,14 @@ const bodies = [
       faceGroups: [],
     },
     topology: [{ id: "stable-face-id", kind: "face" }],
+    edges: { lines: [0, 0, 0, 1.234567891, 0, 0], edgeGroups: [] },
   },
   {
     id: "component-2/body",
     name: "Wheel",
     mesh: { vertices: [1, 2, 3], normals: [], triangles: [], faceGroups: [] },
     topology: [],
+    edges: { lines: [], edgeGroups: [] },
   },
 ];
 const view = {
@@ -33,7 +36,7 @@ const header =
     bodyCount: 2,
   }) + "\n";
 const body = (index: number) =>
-  JSON.stringify({ type: "body", body: bodies[index] }) + "\n";
+  JSON.stringify({ type: "body", body: packDisplayBody(view.geometry.bodies[index], bytes => Buffer.from(bytes).toString("base64")) }) + "\n";
 const done = JSON.stringify({ type: "complete" }) + "\n";
 test("stream displays the first complete part before remaining bytes arrive, preserving CAD identities and precision", async () => {
   let controller!: ReadableStreamDefaultController<BufferSource>;

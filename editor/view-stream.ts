@@ -1,4 +1,5 @@
 import type { View } from "../cad/types.ts";
+import { unpackDisplayBody } from "../cad/view-wire.ts";
 
 /** Parse one pinned view incrementally; never mix revisions or incomplete bodies. */
 export async function receiveView(
@@ -55,11 +56,12 @@ export async function receiveView(
           )
             throw Error("Invalid CAD stream body");
           ids.add(record.body.id);
+          const body = unpackDisplayBody(record.body);
           view = {
             ...view,
             geometry: {
               ...view.geometry,
-              bodies: [...view.geometry.bodies, record.body],
+              bodies: [...view.geometry.bodies, body],
             },
           };
           partial(view, ids.size, total);

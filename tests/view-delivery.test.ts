@@ -10,6 +10,7 @@ import { createMcp } from "../runtime/mcp.ts";
 import { Store } from "../cad/store.ts";
 import { toolset } from "../cad/tools.ts";
 import { deliverView } from "../runtime/view-delivery.ts";
+import { unpackDisplayBody } from "../cad/view-wire.ts";
 import { closeKernel } from "../cad/geometry.ts";
 test("large editor views stay below MCP message limits and retain an exact revision snapshot", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vibe-view-delivery-")),
@@ -49,6 +50,8 @@ test("large editor views stay below MCP message limits and retain an exact revis
       (_, i) => original[i % original.length],
     );
     assert.ok(Buffer.byteLength(JSON.stringify(view)) > 10 * 1024 * 1024);
+    const transferMesh = view.geometry.bodies[0].mesh;
+    const transferEdges = view.geometry.bodies[0].edges;
     const meta = deliverView(store, view);
     assert.ok(Buffer.byteLength(JSON.stringify(meta)) < 1024);
     const chunks = meta.viewChunks as { uriPrefix: string; count: number };
@@ -67,10 +70,12 @@ test("large editor views stay below MCP message limits and retain an exact revis
     const restored = records[0].view;
     restored.geometry.bodies = records
       .filter((record) => record.type === "body")
-      .map((record) => record.body);
+      .map((record) => unpackDisplayBody(record.body));
     assert.equal(records.at(-1).type, "complete");
     assert.equal(restored.document.revision, 3);
     assert.equal(restored.geometry.bodies[0].mesh.vertices.length, 4_000_000);
+    assert.deepEqual(restored.geometry.bodies[0].mesh, transferMesh);
+    assert.deepEqual(restored.geometry.bodies[0].edges, transferEdges);
     assert.deepEqual(
       restored.geometry.bodies[0].topology,
       JSON.parse(JSON.stringify(view.geometry.bodies[0].topology)),
