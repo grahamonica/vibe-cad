@@ -8,6 +8,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcp, uiUri, modelToolNames } from "../runtime/mcp.ts";
 import { Store } from "../cad/store.ts";
 import { closeKernel } from "../cad/geometry.ts";
+import {applyPlacementAck} from '../cad/placement.ts';
+import type {View} from '../cad/types.ts';
 const dir = await mkdtemp(join(tmpdir(), "vibe-cad-mcp-"));
 after(async () => {
   await closeKernel();
@@ -188,4 +190,22 @@ test("MCP handshake, typed tools, annotations, self-contained UI resource, mutat
     await client.close();
     await server.close();
   }
+});
+
+test('MCP rigid and display placement acknowledgements validate without geometry and polling suppresses unchanged data',async()=>{
+ const store=new Store(await mkdtemp(join(dir,'placement-'))),server=createMcp(store),client=new Client({name:'Placement protocol regression',version:'1'});
+ const [a,b]=InMemoryTransport.createLinkedPair();await server.connect(a);await client.connect(b);
+ const run=async(name:string,args:any)=>{const r=await client.callTool({name,arguments:args,_meta:{'vibe-cad/source':'user'}});assert.ok(!r.isError,JSON.stringify(r));return r;};
+ try{
+  const built=await run('run_steps',{steps:[{tool:'create_document',args:{name:'Protocol fixture'}},{tool:'create_sketch',args:{plane:'XY'},as:'profile'},{tool:'add_sketch_entity',args:{sketchId:'@profile.sketch',type:'rectangle',values:{x:0,y:0,width:20,height:10}}},{tool:'extrude',args:{sketchId:'@profile.sketch',distance:4},as:'solid'},{tool:'create_component',args:{bodyIds:['@solid.body'],grounded:false}}]});
+  const original=(built._meta as any).view as View,c=original.document.components![0];let v=original;
+  for(const [name,args]of [['set_component_transform',{componentId:c.id,position:[10,0,0],rotation:[0,0,0]}],['set_explode_offset',{componentId:c.id,offset:[0,50,0]}],['auto_explode',{}]] as const){
+   const r=await run(name,{documentId:v.document.id,expectedRevision:v.document.revision,...args}),ack=r.structuredContent as any;
+   assert.equal(ack.kind,'placement');assert.equal(ack.geometry,undefined);assert.equal(r._meta?.view,undefined);assert.equal(r._meta?.viewChunks,undefined);
+   v=applyPlacementAck(v,ack)!;assert.ok(v);assert.equal(v.geometry.shapeKey,original.geometry.shapeKey);
+  }
+  assert.ok(Math.abs(v.geometry.bodies[0].centerOfMass[0]-original.geometry.bodies[0].centerOfMass[0]-10)<1e-8);
+  const changed=await run('inspect_document_state',{documentId:v.document.id,knownRevision:original.document.revision,knownShapeKey:original.geometry.shapeKey});assert.equal((changed.structuredContent as any).placement.kind,'placement');
+  const idle=await run('inspect_document_state',{documentId:v.document.id,knownRevision:v.document.revision,knownShapeKey:v.geometry.shapeKey});assert.equal((idle.structuredContent as any).placement,undefined);
+ }finally{await client.close();await server.close();}
 });

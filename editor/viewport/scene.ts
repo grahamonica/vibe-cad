@@ -23,6 +23,11 @@ import { textureInfo } from "../../cad/appearance.ts";
 import { textureCanvases } from "./textures.ts";
 import { prepareDrag } from '../../cad/drag-motion.ts';
 import { assertRenderBudget, renderPixelRatio } from './render-budget.ts';
+import { prepareMotion,type MotionPreview } from '../../cad/motion-preview.ts';
+import {samePlacement} from '../../cad/placement.ts';
+import type {Placement} from '../../cad/types.ts';
+import {componentOf,componentOwns} from '../../cad/types.ts';
+import {rigidDragDriver} from '../../cad/rigid-motion.ts';
 import { freeOrbit } from './camera-math.ts';
 import { cameraFor } from '../../cad/drawing.ts';
 
@@ -75,6 +80,7 @@ const upFor = (dir: THREE.Vector3) =>
   Math.abs(dir.y) > 0.999 ? new THREE.Vector3(0, 0, dir.y > 0 ? -1 : 1) : new THREE.Vector3(0, 1, 0);
 
 interface BodyRecord {
+  sectionPasses?:THREE.Mesh[];
   displayKey?: string;
   body: RenderBody;
   mesh: THREE.Mesh;
@@ -95,7 +101,7 @@ interface BodyRecord {
 }
 /** Everything drawn for a body, moved together by explode and the gizmo. */
 const recordObjects = (r: BodyRecord) =>
-  [r.mesh, r.edges, r.outline?.lines, r.hiddenLines, r.highlight].filter((o): o is THREE.Mesh | LineSegments2 => !!o);
+  [r.mesh, r.edges, r.outline?.lines, r.hiddenLines, r.highlight,...(r.sectionPasses??[])].filter((o): o is THREE.Mesh | LineSegments2 => !!o);
 interface CameraTween {
   notify?: boolean;
   from: { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3; zoom: number };
@@ -136,6 +142,7 @@ export class CadScene {
   private hover: { id?: string; plane?: string } = {};
   private needsRender = true;
   private frame = 0;
+  private wakeFrame?:()=>void;
   private tween?: CameraTween;
   private size = { width: 1, height: 1 };
   private cube: ViewCube;
@@ -144,11 +151,16 @@ export class CadScene {
   private mouseMode: 'model' | 'sketch' | 'orbit' = 'model';
   private labelUpdaters = new Set<() => void>();
   onCameraChange?: (position: Vec3, target: Vec3, up: Vec3, zoom: number) => void;
-  onComponentDrag?: (componentId: string, delta: Vec3, rotation: [number, number, number, number]) => void;
+  onComponentDrag?: (componentId: string, delta: Vec3, rotation: [number, number, number, number]) => void|Promise<void>;
+  onInteraction?:(active:boolean)=>void;
+  interactionDisabled=false;
+  directDragEnabled=false;
+  directDragMode?:'rotate'|'translate';
+  onComponentSelected?:(id:string)=>void;
   onContextLost?: () => void;
   onRenderError?: (error: unknown) => void;
   constructor(readonly host: HTMLElement) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, stencil: true });
+    this.renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, stencil: true,powerPreference:'low-power' });
     this.renderer.setPixelRatio(1);
     this.renderer.setClearColor(palette.white);
     this.renderer.autoClear = false;
@@ -196,12 +208,9 @@ export class CadScene {
     this.transform.setSize(0.8);
     this.transform.addEventListener("dragging-changed", (e) => {
       this.controls.enabled = !e.value;
+      if(e.value)this.onInteraction?.(true);
       if (!e.value) {
-        const object = this.transform.object;
-        if (!object?.userData.componentId) return;
-        const delta = object.position.clone().sub(new THREE.Vector3(...(object.userData.origin as Vec3)));
-        if (delta.length() > 1e-6 || object.quaternion.angleTo(new THREE.Quaternion()) > 1e-6)
-          this.onComponentDrag?.(object.userData.componentId, delta.toArray() as Vec3, object.quaternion.toArray());
+        this.commitDrag();
       }
     });
     this.transform.addEventListener("objectChange", () => this.projectDrag());
@@ -209,11 +218,13 @@ export class CadScene {
     this.scene.add(this.transform.getHelper());
     let orbit: { id: number; x: number; y: number } | undefined;
     const down = (e: PointerEvent) => {
+      if(e.button===0&&!e.altKey&&!e.shiftKey&&!e.metaKey&&!e.ctrlKey&&!this.transform.axis&&this.beginDirectDrag(e))return;
       if ((e.button !== 0 && e.button !== 1) || (this.mouseMode === 'sketch' && e.button === 0) || this.transform.axis || this.cubeHit(e.clientX, e.clientY) !== undefined) return;
       this.tween = undefined;
       orbit = { id: e.pointerId, x: e.clientX, y: e.clientY };
     };
     const move = (e: PointerEvent) => {
+      if(this.moveDirectDrag(e)){e.stopImmediatePropagation();return;}
       if (!orbit || orbit.id !== e.pointerId || this.transform.dragging || !this.controls.enabled) return;
       const scale = Math.PI * 2 / Math.max(240, Math.min(this.size.width, this.size.height));
       const pose = freeOrbit(this.camera.position.toArray(), this.controls.target.toArray(), this.camera.up.toArray(),
@@ -222,31 +233,92 @@ export class CadScene {
       this.camera.position.set(...pose.position); this.camera.up.set(...pose.up);
       this.camera.lookAt(this.controls.target); this.invalidate();
     };
-    const up = () => { if (orbit) this.emitCamera(); orbit = undefined; };
+    const up = (e:PointerEvent) => {if(this.directDrag){const moved=this.directDrag.moved;this.finishDirectDrag(e.type!=='pointerup');if(moved)e.stopImmediatePropagation();return;}if (orbit) this.emitCamera(); orbit = undefined; };
+    const blur=()=>{if(this.directDrag)this.finishDirectDrag(true);};
+    const escape=(e:KeyboardEvent)=>{if(e.key==='Escape'&&this.directDrag){this.finishDirectDrag(true);e.stopImmediatePropagation();e.preventDefault();}};
     const el = this.renderer.domElement;
-    el.addEventListener('pointerdown', down); el.addEventListener('pointermove', move);
-    el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
-    this.disposeHooks.push(() => { el.removeEventListener('pointerdown', down); el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); el.removeEventListener('pointercancel', up); });
+    el.addEventListener('pointerdown', down,true); el.addEventListener('pointermove', move,true);
+    el.addEventListener('pointerup', up,true); el.addEventListener('pointercancel', up,true);el.addEventListener('lostpointercapture',up,true);window.addEventListener('keydown',escape,true);window.addEventListener('blur',blur);
+    this.disposeHooks.push(() => { el.removeEventListener('pointerdown', down,true); el.removeEventListener('pointermove', move,true); el.removeEventListener('pointerup', up,true); el.removeEventListener('pointercancel', up,true);el.removeEventListener('lostpointercapture',up,true);window.removeEventListener('keydown',escape,true);window.removeEventListener('blur',blur); });
     this.cube = new ViewCube(this);
     this.triad = new Triad();
     const resize = new ResizeObserver(() => this.resize());
     resize.observe(host);
     this.resize();
     const loop = () => {
-      if (this.disposed) return;
-      this.frame = requestAnimationFrame(loop);
-      try { this.step(); }
+      this.frame=0;
+      if (this.disposed||document.hidden) return;
+      try { this.step();if(this.tween)this.invalidate(); }
       catch (error) { cancelAnimationFrame(this.frame); this.onRenderError?.(error); }
     };
-    loop();
+    this.wakeFrame=()=>{if(!this.frame&&!this.disposed&&!document.hidden)this.frame=requestAnimationFrame(loop);};
+    const visibility=()=>{if(document.hidden){cancelAnimationFrame(this.frame);this.frame=0;}else this.invalidate();};
+    document.addEventListener('visibilitychange',visibility);
+    this.disposeHooks.push(()=>document.removeEventListener('visibilitychange',visibility));
+    this.invalidate();
     this.disposeHooks.push(() => resize.disconnect());
   }
   private currentView?: View;
+  private directDrag?:{id:number;x:number;y:number;point:THREE.Vector3;plane:THREE.Plane;position:THREE.Vector3;pivot:THREE.Vector3;axis:THREE.Vector3;moved:boolean};
+  /** Drag the selected part itself. Camera motion remains on empty space / Alt-drag. */
+  private beginDirectDrag(e:PointerEvent){
+    if(!this.directDragEnabled||this.mouseMode!=='model'||this.interactionDisabled||!this.currentView||this.motionPreview||this.cubeHit(e.clientX,e.clientY)!==undefined)return false;
+    const meshes=[...this.bodies.values()].filter(r=>r.mesh.visible&&r.style!=='wireframe').map(r=>r.mesh);
+    const hit=this.ray(e.clientX,e.clientY).intersectObjects(meshes,false).find(h=>this.kept(h.point));
+    if(!hit)return false;
+    const owner=componentOf(this.currentView.document,hit.object.userData.bodyId),c=owner&&rigidDragDriver(this.currentView,owner.id);
+    if(!c||c.grounded||c.suppressed||c.belt)return false;
+    let object=this.transform.object;
+    if(!object||object.userData.componentId!==c.id){
+      const hinge=this.currentView.document.mates?.find(m=>!m.suppressed&&(m.type==='concentric'||m.type==='gear')&&componentOwns(c,m.moving.bodyId));
+      const axis=hinge&&this.currentView.geometry.bodies.flatMap(b=>b.topology).find(t=>t.id===hinge.moving.id)?.axis?.direction;
+      this.attachGizmo(c.id,[...this.bodies.keys()].filter(id=>componentOwns(c,id)),c.position,this.directDragMode??(hinge?'rotate':'translate'),axis);
+      object=this.transform.object;
+    }
+    if(!object||!this.dragMotion)return false;
+    const axis=new THREE.Vector3(...(object.userData.axis??this.camera.getWorldDirection(new THREE.Vector3()).toArray())).normalize();
+    const rotate=this.transform.mode==='rotate';
+    const pivot=new THREE.Vector3(...object.userData.pivot as Vec3);
+    const plane=new THREE.Plane().setFromNormalAndCoplanarPoint(rotate?axis:this.camera.getWorldDirection(new THREE.Vector3()),rotate?pivot:hit.point);
+    const point=this.ray(e.clientX,e.clientY).ray.intersectPlane(plane,new THREE.Vector3());if(!point)return false;
+    this.directDrag={id:e.pointerId,x:e.clientX,y:e.clientY,point,plane,position:object.position.clone(),pivot,axis,moved:false};
+    this.onComponentSelected?.(object.userData.componentId);
+    this.controls.enabled=false;this.tween=undefined;this.onInteraction?.(true);this.renderer.domElement.setPointerCapture(e.pointerId);return true;
+  }
+  private moveDirectDrag(e:PointerEvent){
+    const d=this.directDrag,object=this.transform.object;if(!d||d.id!==e.pointerId||!object)return false;
+    if(!d.moved&&Math.hypot(e.clientX-d.x,e.clientY-d.y)<4)return true;
+    const point=this.ray(e.clientX,e.clientY).ray.intersectPlane(d.plane,new THREE.Vector3());if(!point)return true;
+    d.moved=true;
+    if(this.transform.mode==='rotate'){
+      const a=d.point.clone().sub(d.pivot).normalize(),b=point.sub(d.pivot).normalize();
+      object.quaternion.setFromAxisAngle(d.axis,Math.atan2(d.axis.dot(a.clone().cross(b)),a.dot(b)));
+      object.position.copy(d.position).sub(d.pivot).applyQuaternion(object.quaternion).add(d.pivot);
+    }else object.position.copy(d.position).add(point.sub(d.point));
+    this.projectDrag();return true;
+  }
+  private finishDirectDrag(cancelled:boolean){
+    const d=this.directDrag;if(!d)return;this.directDrag=undefined;this.controls.enabled=true;
+    if(this.renderer.domElement.hasPointerCapture(d.id))this.renderer.domElement.releasePointerCapture(d.id);
+    if(cancelled){this.restoreDrag();this.onInteraction?.(false);}else this.commitDrag();
+  }
+  private restoreDrag(){const object=this.transform.object;if(object){object.position.set(...object.userData.origin as Vec3);object.quaternion.identity();this.projectDrag();}}
+  private commitDrag(){
+    const object=this.transform.object;if(!object?.userData.componentId){this.onInteraction?.(false);return;}
+    const delta=object.position.clone().sub(new THREE.Vector3(...object.userData.origin));
+    if(delta.length()<1e-6&&object.quaternion.angleTo(new THREE.Quaternion())<1e-6){this.onInteraction?.(false);return;}
+    try{Promise.resolve(this.onComponentDrag?.(object.userData.componentId,delta.toArray() as Vec3,object.quaternion.toArray())).catch(()=>this.restoreDrag()).finally(()=>this.onInteraction?.(false));}
+    catch{this.restoreDrag();this.onInteraction?.(false);}
+  }
   private dragMotion?: ReturnType<typeof prepareDrag>;
+  private motionPreview?: ReturnType<typeof prepareMotion>;
   private dragMatrices = new Map<THREE.Object3D, THREE.Matrix4>();
+  private displayedPlacements=new Map<string,Placement>();
   private resetDrag() {
+    if(this.directDrag){const id=this.directDrag.id;this.directDrag=undefined;if(this.renderer.domElement.hasPointerCapture(id))this.renderer.domElement.releasePointerCapture(id);this.onInteraction?.(false);}
+    this.transform.dragging=false;this.controls.enabled=true;
     for(const [o,m]of this.dragMatrices){o.matrix.copy(m);o.matrix.decompose(o.position,o.quaternion,o.scale);o.matrixAutoUpdate=true;}
-    this.dragMatrices.clear();this.dragMotion=undefined;
+    this.dragMatrices.clear();this.displayedPlacements.clear();this.dragMotion=undefined;this.motionPreview=undefined;
   }
   private projectDrag() {
     const target=this.transform.object,motion=this.dragMotion;
@@ -255,13 +327,36 @@ export class CadScene {
     const desired={position:target.position.toArray() as Vec3,quaternion:target.quaternion.clone().multiply(new THREE.Quaternion(...start.quaternion)).normalize().toArray() as [number,number,number,number]};
     const projected=motion.solve(desired),pose=projected.components[cid];
     target.position.set(...pose.position);target.quaternion.copy(new THREE.Quaternion(...pose.quaternion).multiply(new THREE.Quaternion(...start.quaternion).invert()));
+    this.displayPlacements(projected.bodies);
+    target.updateMatrixWorld(true);this.invalidate();
+  }
+  private displayPlacements(placements:NonNullable<Geometry['placements']>){
     for(const [id,r]of this.bodies){
-      const before=this.currentView?.geometry.placements?.[id],after=projected.bodies[id];if(!before||!after)continue;
+      const before=this.currentView?.geometry.placements?.[id],after=placements[id];if(!before||!after)continue;
+      if(samePlacement(this.displayedPlacements.get(id)??before,after))continue;
+      this.displayedPlacements.set(id,after);
       const mat=(p:typeof before)=>new THREE.Matrix4().compose(new THREE.Vector3(...p.position),new THREE.Quaternion(...p.quaternion),new THREE.Vector3(1,1,1));
       const delta=mat(after).multiply(mat(before).invert());
       for(const o of recordObjects(r)) {const original=this.dragMatrices.get(o);if(!original)continue;o.matrixAutoUpdate=false;o.matrix.copy(delta).multiply(original);o.updateMatrixWorld(true);}
     }
-    target.updateMatrixWorld(true);this.invalidate();
+    if(this.section){
+      const bounds=new THREE.Box3();for(const r of this.bodies.values())if(!r.mesh.userData.pickOnly){r.mesh.geometry.computeBoundingBox();bounds.union(r.mesh.geometry.boundingBox!.clone().applyMatrix4(r.mesh.matrixWorld));}
+      for(const child of this.sectionGroup.children)if(child.userData.ownGeometry&&!bounds.isEmpty()){
+        const normal=this.section.normal.clone().negate(),span=bounds.getSize(new THREE.Vector3()).length()*2+10;
+        child.position.copy(bounds.getCenter(new THREE.Vector3()).projectOnPlane(normal).addScaledVector(normal,this.section.constant));child.scale.setScalar(span/child.userData.span);
+      }
+    }
+    this.invalidate();
+  }
+  beginMotion(spec:MotionPreview|null){
+    if(!spec&&!this.motionPreview)return;
+    const old=this.transform.object;this.transform.detach();old?.removeFromParent();this.resetDrag();
+    if(!spec||!this.currentView){this.invalidate();return;}
+    this.motionPreview=prepareMotion(this.currentView,spec);
+    for(const r of this.bodies.values())for(const o of recordObjects(r)){o.updateMatrix();this.dragMatrices.set(o,o.matrix.clone());}
+  }
+  previewMotion(phase:number){
+    if(this.motionPreview)this.displayPlacements(this.motionPreview.at(phase).bodies);
   }
   private disposeHooks: (() => void)[] = [];
   setMouseMode(mode: "model" | "sketch" | "orbit") {
@@ -275,6 +370,7 @@ export class CadScene {
   }
   invalidate() {
     this.needsRender = true;
+    this.wakeFrame?.();
   }
   private resize() {
     const rect = this.host.getBoundingClientRect();
@@ -566,11 +662,13 @@ export class CadScene {
   private clearSection() {
     // Stencil passes share geometry with bodies. Dispose only what they own.
     for (const child of [...this.sectionGroup.children]) {
+      this.dragMatrices.delete(child);
       const mesh = child as THREE.Mesh;
       (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).forEach(m => m.dispose());
       if (child.userData.ownGeometry) mesh.geometry.dispose();
       child.removeFromParent();
     }
+    for(const r of this.bodies.values())r.sectionPasses=undefined;
   }
   /**
    * Section view: cut the model with a plane, keeping the side where
@@ -617,7 +715,10 @@ export class CadScene {
             clippingPlanes: planes,
           });
           const pass = new THREE.Mesh(r.mesh.geometry, material);
-          pass.position.copy(r.mesh.position);
+          if(r.mesh.matrixAutoUpdate)r.mesh.updateMatrix();r.mesh.updateMatrixWorld(true);
+          pass.matrixAutoUpdate=false;pass.matrix.copy(r.mesh.matrix);pass.matrixWorld.copy(r.mesh.matrixWorld);
+          if(this.dragMatrices.size)this.dragMatrices.set(pass,(this.dragMatrices.get(r.mesh)??r.mesh.matrix).clone());
+          (r.sectionPasses??=[]).push(pass);
           pass.renderOrder = 20;
           this.sectionGroup.add(pass);
         }
@@ -641,6 +742,7 @@ export class CadScene {
           }),
         );
         cap.userData.ownGeometry = true;
+        cap.userData.span=size;
         cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
         // Centered on the model, on the plane normal · p = offset.
         cap.position.copy(box.getCenter(new THREE.Vector3()).projectOnPlane(normal).addScaledVector(normal, this.section.constant));
@@ -965,12 +1067,15 @@ export class CadScene {
   }
   /** Attach the translate gizmo to a body's displayed position (assembly component moves). */
   attachGizmo(componentId: string, bodyIds: string[], position: Vec3, mode: 'translate' | 'rotate' = 'translate', axis?: Vec3) {
+    if(this.directDrag&&this.transform.object?.userData.componentId===componentId)return;
     const old = this.transform.object;
     this.transform.detach();old?.removeFromParent();this.resetDrag();
     if(!bodyIds.some(id=>this.bodies.has(id)))return;
     this.dragMotion=this.currentView&&prepareDrag(this.currentView,componentId);
     const origin=this.dragMotion?.initial[componentId]?.position??position;
-    const wrapper=new THREE.Group();wrapper.position.set(...origin);wrapper.userData={componentId,origin};
+    const hinge=this.currentView?.document.mates?.find(m=>!m.suppressed&&m.type==='concentric'&&componentOf(this.currentView!.document,m.moving.bodyId)?.id===componentId);
+    const pivot=hinge&&this.currentView?.geometry.bodies.flatMap(b=>b.topology).find(t=>t.id===hinge.moving.id)?.axis?.origin;
+    const wrapper=new THREE.Group();wrapper.position.set(...origin);wrapper.userData={componentId,origin,bodyIds,axis,pivot:pivot??origin};
     for(const r of this.bodies.values())for(const o of recordObjects(r)){o.updateMatrix();this.dragMatrices.set(o,o.matrix.clone());}
     this.bodiesGroup.add(wrapper);
     this.transform.attach(wrapper);
@@ -981,6 +1086,7 @@ export class CadScene {
     this.transform.showZ = !principal || Math.abs(axis![2]) > 0.999999;
     this.invalidate();
   }
+  clearGizmo(){const object=this.transform.object;this.transform.detach();object?.removeFromParent();this.resetDrag();this.invalidate();}
   setSelection(refs: TopologyRef[], planes: string[] = []) {
     this.selection = new Set(refs.map((r) => r.id));
     this.selectedPlanes = new Set(planes);
@@ -1188,7 +1294,8 @@ export class CadScene {
     this.clearGroup(this.helperGroup);
     this.bodies.clear();
     this.currentView=undefined;
-    this.dragMatrices.clear();this.dragMotion=undefined;
+    this.dragMatrices.clear();this.displayedPlacements.clear();this.dragMotion=undefined;this.motionPreview=undefined;this.directDrag=undefined;this.wakeFrame=undefined;
+    this.onInteraction?.(false);this.onInteraction=undefined;this.onComponentDrag=undefined;
     this.labelUpdaters.clear();
     this.cube.dispose();
     this.triad.dispose();

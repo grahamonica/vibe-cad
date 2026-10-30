@@ -10,6 +10,7 @@ import type { Document, Geometry, View, Preview } from "./types.ts";
 import type { Material } from "./standards.ts";
 import { trimHistory, currentDesign } from './history-policy.ts';
 import { BuildControl } from './build-control.ts';
+import { repositionAssembly, placementAck } from './placement.ts';
 
 /** Converted sketch edges follow the model: keep the saved sketch in step with the rebuild. */
 function applySketchUpdates(doc: Pick<Document, "sketches">, geometry: Geometry) {
@@ -47,6 +48,7 @@ export class DocumentStore {
   private previews = new Map<string, Preview>();
   private cache = new Map<string, { revision: number; links: string; geometry: Geometry }>();
   private remember(id: string, entry: { revision: number; links: string; geometry: Geometry }) {
+    entry.geometry.shapeKey ??= this.uuid();
     this.cache.delete(id);
     this.cache.set(id, entry);
     const size = (g: Geometry) => g.bodies.reduce((n, b) => n +
@@ -295,7 +297,7 @@ export class DocumentStore {
           : undefined,
     };
   }
-  async state(id: string) {
+  async state(id: string,knownRevision?:number,knownShapeKey?:string) {
     const doc = await this.read(id),
       preview = this.previews.get(id);
     return {
@@ -305,6 +307,7 @@ export class DocumentStore {
       viewport: doc.viewport,
       previewId: preview?.baseRevision === doc.revision ? preview.id : null,
       dependencyKey: Object.values(await this.linkedDocuments(doc)).map(d => `${d.id}@${d.revision}`).sort().join(','),
+      ...(knownRevision!==doc.revision&&this.cache.get(doc.id)?.revision===doc.revision&&(this.cache.get(doc.id)?.geometry.placementOnly||knownShapeKey&&knownShapeKey===this.cache.get(doc.id)?.geometry.shapeKey) ? {placement:placementAck(await this.view(doc),true)}:{}),
     };
   }
   async validateEdit(id: string, expectedRevision: number, edit: (d: Document) => void, level: 'structure' | 'geometry') {
@@ -420,6 +423,7 @@ export class DocumentStore {
     source: "user" | "assistant",
     edit: (doc: Document) => void | Promise<void>,
     owner = "local",
+    evaluation?:{kind:'placement';componentId:string}|{kind:'display'},
   ): Promise<View> {
     return this.locked(id, async () => {
       const doc = await this.read(id, owner);
@@ -433,7 +437,24 @@ export class DocumentStore {
         throw Error("Limit of 200 features reached");
       applyEquations(next);
       validateDocument(next);
-      const { geometry, links } = await this.rebuild(next);
+      // Pure instance motion reuses validated shape geometry. Geometry-changing belt
+      // lengths and converted sketch references still require their parametric update.
+      const hasDependentGeometry=(next.components??[]).some(c=>c.belt)||(next.sketches??[]).some(s=>s.support||s.entities.some(e=>e.projected));
+      const placementComponentId=evaluation?.kind==='placement'?evaluation.componentId:undefined;
+      let geometry:Geometry,links:string;
+      if(evaluation?.kind==='display'){
+        const shapes=(d:Document)=>JSON.stringify({...snapshot(d),components:(d.components??[]).map(({explode:_,...c})=>c)});
+        if(shapes(doc)!==shapes(next))throw Error('A display transaction may change only exploded offsets');
+        const previous=await this.view(doc);geometry=previous.geometry;links=geometry.dependencyKey??'';
+      }else if(placementComponentId&&!hasDependentGeometry){
+        const shapes=(d:Document)=>JSON.stringify({...snapshot(d),components:(d.components??[]).map(({position:_,rotation:__,...c})=>c)});
+        if(shapes(doc)!==shapes(next))throw Error('A placement transaction may change only component poses');
+        const previous=await this.view(doc);links=previous.geometry.dependencyKey??'';
+        geometry=repositionAssembly(next,previous.geometry,placementComponentId);
+      }else{
+        if(placementComponentId){const previous=await this.view(doc);repositionAssembly(next,previous.geometry,placementComponentId);}
+        ({geometry,links}=await this.rebuild(next));
+      }
       applySketchUpdates(next, geometry);
       for (const sheet of next.drawings ?? [])
         for (const dim of [

@@ -294,10 +294,10 @@ export function toolset(store: Store) {
     d.features.push(f);
     return f;
   };
-  add('engine_info','CAD engine version','Read the running engine version and supported fast-edit, motion and editor lifecycle capabilities.',{},true,async()=>({version:'1.1.2',capabilities:['typed-design-json','atomic-bulk-edits','motion-intent','mate-travel-limits','editor-session-close','incremental-gpu-geometry','graphics-context-recovery','lightweight-camera-selection']}));
-  add('manage_editors','Manage open CAD editors','List live editor panels, close a panel, or close unused editors except the current document/session. Unsaved drafts are protected. Editors request host teardown and release their renderer when retired.',
-    {action:z.enum(['list','register','heartbeat','close','close_others']),sessionId:id.optional(),documentId:id.optional(),dirty:z.boolean().default(false)},false,
-    async a=>store.editors.update(a.action,a.sessionId,a.documentId,a.dirty));
+  add('engine_info','CAD engine version','Read the running engine version and supported fast-edit, motion and editor lifecycle capabilities.',{},true,async()=>({version:'1.1.3',capabilities:['typed-design-json','atomic-bulk-edits','motion-intent','mate-travel-limits','editor-session-close','incremental-gpu-geometry','graphics-context-recovery','lightweight-camera-selection','cached-rigid-motion','live-part-drag','live-motion-playback','placement-only-replies','live-editor-reload','bounded-view-transfer','event-driven-rendering','host-teardown-acknowledgement']}));
+  add('manage_editors','Manage open CAD editors','List renderer liveness, request close or reload of a live panel, or close other saved editors. Unsaved drafts are protected. closeRequested is not proof that the host closed a tab: closed is true only after teardown_ack. Unresponsive panels require the supplied user recovery instructions; no dead-panel host control is available. register/heartbeat/teardown_ack are renderer lifecycle operations.',
+    {action:z.enum(['list','register','heartbeat','close','close_others','reload','teardown_ack','forget','resume']),sessionId:id.optional(),documentId:id.optional(),dirty:z.boolean().default(false),confirmHostClosed:z.boolean().default(false).describe('For forget only: true only after the user confirms closing that host tab with ×. Forget removes a stale registry record and never closes a tab.')},false,
+    async(a,source)=>{if(a.action==='teardown_ack'&&source!=='user')throw Error('Only the renderer host teardown callback can acknowledge closure');return store.editors.update(a.action,a.sessionId,a.documentId,a.dirty,a.confirmHostClosed);});
   add('inspect_design','Read lightweight design JSON','Read authoritative sketches, dimensions, variables, features, component placements and mates without meshes, history copies or imported bytes. Optional linked designs are current dependencies only.',
     {...base,includeLinked:z.boolean().default(false)},true,async a=>{const d=await store.read(a.documentId);return {design:designJSON(d),...(a.includeLinked?{linked:Object.values(await store.linkedDocuments(d)).map(designJSON)}:{})};});
   add('edit_design','Apply atomic design JSON edits','Apply many sketch replacements, numeric feature edits, variables and component poses in one validated transaction and one kernel rebuild. Fixed whole profiles require purpose artwork; functional interfaces should be dimensioned. IDs and source imports remain protected.',
@@ -327,9 +327,9 @@ export function toolset(store: Store) {
     "inspect_document_state",
     "Check CAD document changes",
     "Read only revision, selection, camera, and preview identity. Use this inexpensive state check before requesting full editor geometry when polling for changes.",
-    base,
+    {...base,knownRevision:z.number().int().min(0).optional(),knownShapeKey:id.optional()},
     true,
-    async (a) => store.state(a.documentId),
+    async (a) => store.state(a.documentId,a.knownRevision,a.knownShapeKey),
   );
   add(
     "inspect_document",
@@ -3751,7 +3751,7 @@ export function toolset(store: Store) {
       const loop = mateLoops(before).find((g) => g.includes(a.componentId));
       const shown = loop ? await store.view(before) : undefined;
       const local = shown && localTopology(shown.geometry);
-      return mutate(a, s, "Positioned component", (d) => {
+      return store.transact(a.documentId,a.expectedRevision,a.reason??"Positioned component",s,(d) => {
         const c = d.components?.find((c) => c.id === a.componentId);
         if (!c) throw Error("Component not found");
         if (c.belt) throw Error("A belt follows its pulleys; move or mate the pulleys instead");
@@ -3771,7 +3771,7 @@ export function toolset(store: Store) {
             member.rotation = eulerDegrees(solved[id]).map((x) => Math.round(x * 1e9) / 1e9) as Vec3;
           }
         }
-      });
+      },'local',{kind:'placement',componentId:a.componentId});
     },
   );
   add(
@@ -3989,11 +3989,11 @@ export function toolset(store: Store) {
     { ...write, componentId: id, offset: vec3 },
     false,
     async (a, s) =>
-      mutate(a, s, "Changed exploded view", (d) => {
+      store.transact(a.documentId,a.expectedRevision,a.reason??"Changed exploded view",s,(d) => {
         const c = d.components?.find((c) => c.id === a.componentId);
         if (!c) throw Error("Component not found");
         c.explode = a.offset;
-      }),
+      },'local',{kind:'display'}),
   );
   add(
     "auto_explode",
@@ -4004,10 +4004,10 @@ export function toolset(store: Store) {
     async (a, s) => {
       const d0 = await store.read(a.documentId),
         offsets = autoExplode(d0, (await store.view(d0)).geometry, a.spacing);
-      return mutate(a, s, "Exploded assembly", (d) => {
+      return store.transact(a.documentId,a.expectedRevision,a.reason??"Exploded assembly",s,(d) => {
         if (!d.components?.length) throw Error("Insert parts or make components first");
         for (const c of d.components) c.explode = offsets[c.id] ?? [0, 0, 0];
-      });
+      },'local',{kind:'display'});
     },
   );
   add(

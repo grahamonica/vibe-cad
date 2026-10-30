@@ -1,38 +1,50 @@
-/** Live editor leases only. No geometry, drafts or persistent document data. */
+import {editorRecovery} from './editor-recovery.ts';
+/** Renderer heartbeats are not proof that a host tab has closed. */
 export class EditorSessions {
-  private sessions = new Map<string, { sessionId: string; documentId: string; touched: number; dirty: boolean; closed: boolean }>();
+  private sessions = new Map<string, { sessionId: string; documentId: string; touched: number; dirty: boolean; closeRequested: boolean; hostClosed:boolean; reloadRequested:boolean }>();
   readonly limit = 5;
   constructor(private now = () => Date.now()) {}
   private sweep() {
-    for (const [id, s] of this.sessions) if (this.now() - s.touched > 90_000) this.sessions.delete(id);
     while (this.sessions.size > 32) {
-      const retired = [...this.sessions.values()].find(s => s.closed);
+      const retired = [...this.sessions.values()].find(s => s.hostClosed);
       if (!retired) break;
       this.sessions.delete(retired.sessionId);
     }
   }
-  update(action: 'list' | 'register' | 'heartbeat' | 'close' | 'close_others', sessionId?: string, documentId?: string, dirty = false) {
+  update(action: 'list' | 'register' | 'heartbeat' | 'close' | 'close_others' | 'reload' | 'teardown_ack'|'forget'|'resume', sessionId?: string, documentId?: string, dirty = false,confirmHostClosed=false) {
     this.sweep();
     if (action === 'register') {
       if (!sessionId || !documentId) throw Error('Register needs sessionId and documentId');
-      for (const s of this.sessions.values()) if (s.documentId === documentId && s.sessionId !== sessionId && !s.dirty) s.closed = true;
-      const active = [...this.sessions.values()].filter(s => !s.closed && s.sessionId !== sessionId).sort((a,b) => a.touched - b.touched);
-      const available = active.find(s => !s.dirty);
-      const denied = active.length >= this.limit && !available;
-      if (!denied && active.length >= this.limit) available!.closed = true;
-      this.sessions.set(sessionId, {sessionId, documentId, touched: this.now(), dirty, closed: denied});
+      for (const s of this.sessions.values()) if (s.documentId === documentId && s.sessionId !== sessionId && !s.dirty&&!s.hostClosed) s.closeRequested = true;
+      const occupied = [...this.sessions.values()].filter(s => !s.hostClosed && s.sessionId !== sessionId).sort((a,b) => a.touched - b.touched);
+      const denied = occupied.length >= this.limit;
+      if(denied){const saved=occupied.find(s=>!s.dirty);if(saved)saved.closeRequested=true;}
+      // Never hide a crashed/pending tab by expiring its lease, or overwrite another document's live session.
+      const previous=this.sessions.get(sessionId);
+      if(previous&&previous.documentId!==documentId&&!previous.hostClosed&&previous.dirty)throw Error('Finish or cancel unsaved edits before switching documents');
+      if(this.sessions.size>=32&&!previous)throw Error('Too many unconfirmed editor tabs. Close unused tabs with their × buttons before reopening.');
+      this.sessions.set(sessionId, {sessionId, documentId, touched: this.now(), dirty, closeRequested: denied,hostClosed:false,reloadRequested:false});
     }
-    const current = sessionId && this.sessions.get(sessionId);
+    const current = sessionId ? this.sessions.get(sessionId):undefined;
+    if(action==='forget'){
+      if(!sessionId||!confirmHostClosed)throw Error('Forget requires a sessionId and confirmation that the user closed that host tab with ×. It does not close a tab.');
+      this.sessions.delete(sessionId);
+    }
     if (action === 'heartbeat' && current) { current.touched = this.now(); current.dirty = dirty; }
-    if (action === 'close' && current) {
-      if (current.dirty) throw Error('Finish or cancel unsaved edits before closing this editor');
-      current.closed = true;
+    if(action==='close'||action==='reload'){
+      if(!sessionId&&!documentId)throw Error('Choose a sessionId or documentId');
+      const targets=[...this.sessions.values()].filter(s=>sessionId?s.sessionId===sessionId:s.documentId===documentId).filter(s=>!s.hostClosed);
+      if(targets.some(s=>s.dirty))throw Error('Finish or cancel unsaved edits before closing or reloading this editor');
+      for(const s of targets)if(action==='close'){s.closeRequested=true;s.reloadRequested=false;}else if(!s.closeRequested)s.reloadRequested=true;
     }
+    if(action==='teardown_ack'&&current){current.hostClosed=true;current.reloadRequested=false;}
     if (action === 'close_others') for (const s of this.sessions.values())
-      if (s.sessionId !== sessionId && s.documentId !== documentId && !s.dirty) s.closed = true;
+      if (s.sessionId !== sessionId && s.documentId !== documentId && !s.dirty&&!s.hostClosed) {s.closeRequested = true;s.reloadRequested=false;}
     this.sweep();
-    return {limit: this.limit, sessionId, closeRequested: action === 'heartbeat' && !current || !!current && current.closed,
-      editors: [...this.sessions.values()].map(s => ({...s})),
-      protectedDrafts: [...this.sessions.values()].filter(s => !s.closed && s.dirty).length};
+    const editors=[...this.sessions.values()].map(s=>({...s,closed:s.hostClosed,status:s.hostClosed?'host_closed':this.now()-s.touched>90_000?'unresponsive':s.closeRequested?'close_requested':s.reloadRequested?'reload_requested':'active'}));
+    return {limit: this.limit, sessionId,resumeDocumentId:action==='resume'&&current&&!current.hostClosed&&!current.closeRequested?current.documentId:undefined,registerRequired:action==='heartbeat'&&!current,closeRequested:!!current && (current.closeRequested||current.hostClosed),reloadRequested:!!current?.reloadRequested,
+      editors,deadPanelControl:'host-only',recoveryInstructions:editorRecovery,
+      hostActionRequired:editors.some(s=>s.status==='unresponsive'),
+      protectedDrafts: [...this.sessions.values()].filter(s => !s.hostClosed && s.dirty).length};
   }
 }

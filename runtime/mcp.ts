@@ -11,7 +11,8 @@ import { outputSchemas, viewOutput } from "./output-schemas.ts";
 import { Store } from "../cad/store.ts";
 import type { View } from "../cad/types.ts";
 import { deliverView, registerViewResources } from "./view-delivery.ts";
-export const uiUri = "ui://vibe-cad/editor-1.1.2.html";
+import { placementAck } from '../cad/placement.ts';
+export const uiUri = "ui://vibe-cad/editor-1.1.3.html";
 // Keep the model catalog small enough to survive host catalog budgets. The
 // editor still has every typed operation, and run_steps validates those same
 // schemas. Specialist schemas can be requested without loading all of them.
@@ -25,14 +26,14 @@ export const modelToolNames = new Set([
 ]);
 export function createMcp(store: Store) {
   const server = new McpServer(
-    { name: "vibe-cad", version: "1.1.2" },
+    { name: "vibe-cad", version: "1.1.3" },
     {
       instructions:
         "Local parametric CAD. Open with open_cad; build with run_steps. Use get_tool_schema for specialist operations. UI and tools share saved documents and revisions. Units: mm. Never invent topology IDs; failed edits preserve the committed model.",
     },
   );
   registerViewResources(server, store);
-  for(const resourceUri of [uiUri, "ui://vibe-cad/editor-1.1.1.html", "ui://vibe-cad/editor-1.1.html", "ui://vibe-cad/editor.html"]) registerAppResource(server, resourceUri===uiUri?"CAD editor":"CAD editor compatibility", resourceUri, {}, async () => ({
+  for(const resourceUri of [uiUri, "ui://vibe-cad/editor-1.1.2.html", "ui://vibe-cad/editor-1.1.1.html", "ui://vibe-cad/editor-1.1.html", "ui://vibe-cad/editor.html"]) registerAppResource(server, resourceUri===uiUri?"CAD editor":"CAD editor compatibility", resourceUri, {}, async () => ({
     contents: [
       {
         uri: resourceUri,
@@ -90,11 +91,15 @@ export function createMcp(store: Store) {
           const batch = result?.view?.document && result?.view?.geometry;
           const view = (batch ? result.view : result) as View;
           const contextOnly = tool.name === 'set_viewport' || tool.name === 'set_selection';
-          const shown = !!(view?.document && view?.geometry) && !contextOnly;
+          const displayOnly=['set_explode_offset','auto_explode'].includes(tool.name);
+          const placementOnly = (tool.name==='set_component_transform'||displayOnly) && view?.geometry && placementAck(view,displayOnly);
+          const shown = !!(view?.document && view?.geometry) && !contextOnly && !placementOnly;
           // Pictures (capture_view) go to the assistant as images; the JSON keeps their names.
           const pictures: { name: string; mimeType: string; data: string }[] =
             Array.isArray(result?.images) ? result.images : [];
-          const structuredContent = contextOnly && view?.document
+          const structuredContent = placementOnly
+            ? {...placementOnly,document:{...placementOnly.document,units:placementOnly.document.units??'mm'}}
+            : contextOnly && view?.document
             ? {kind:'context',document:{id:view.document.id,revision:view.document.revision,selection:view.document.selection,viewport:view.document.viewport}}
             : batch
             ? (({ view: _, ...report }) => report)(result)

@@ -2,12 +2,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { View } from "../cad/types.ts";
 import { applyContextAck } from './context-ack.ts';
+import { applyPlacementAck } from '../cad/placement.ts';
 import {
   call,
   context,
   initialize,
   onView,
-  onEditorClosed, editorAlive, noteEditorDocument, closeEditor, closeOtherEditors, setEditorDirty,
+  onEditorClosed, editorAlive, noteEditorDocument, closeEditor, closeOtherEditors, setEditorDirty,setInteractionDirty,reloadEditor,takeResumeDocument,
   onTransfer,
   type ViewTransfer,
 } from "./bridge.ts";
@@ -102,7 +103,7 @@ export function useCad() {
       return;
     if(!editorAlive())return;
     latest.current = v;
-    noteEditorDocument(v.document.id);
+    void noteEditorDocument(v.document.id).catch(e=>setError((e as Error).message));
     setView(v);
     if (!transferRef.current.active) void context(v).catch(() => {});
   };
@@ -126,6 +127,8 @@ export function useCad() {
       try {
         await initialize();
         await refreshDocuments();
+        const resume=takeResumeDocument();
+        if(resume&&!latest.current)accept(await call<View>('inspect_document',{documentId:resume}));
       } catch (e) {
         setError((e as Error).message);
       } finally {
@@ -135,6 +138,7 @@ export function useCad() {
     // Pick up edits made by the assistant through the same document.
     let polling = false;
     const timer = setInterval(() => {
+      if(!editorAlive()){clearInterval(timer);return;}
       const current = latest.current;
       if (
         !editorAlive() || !current ||
@@ -145,7 +149,7 @@ export function useCad() {
       )
         return;
       polling = true;
-      void call("inspect_document_state", { documentId: current.document.id })
+      void call("inspect_document_state", { documentId: current.document.id,knownRevision:current.document.revision,knownShapeKey:current.geometry.shapeKey })
         .then(async (state: any) => {
           const now = latest.current;
           if (
@@ -159,6 +163,8 @@ export function useCad() {
               state.previewId === (now.preview?.id ?? null))
           )
             return;
+          const placed=applyPlacementAck(now,state.placement);
+          if(placed&&!pendingRef.current){accept(placed);return;}
           const updated = await call<View>("inspect_document", {
             documentId: state.documentId,
           });
@@ -171,6 +177,7 @@ export function useCad() {
   useEffect(() => {
     let polling = false, unsupported = false, disposed = false;
     const timer = setInterval(() => {
+      if(!editorAlive()){clearInterval(timer);return;}
       if (!editorAlive() || polling || unsupported || document.hidden) return;
       polling = true;
       void call<{ build: BuildState }>('control_build', { action: 'status' })
@@ -214,6 +221,11 @@ export function useCad() {
       try {
         const result = await call<any>(name, full);
         if (result?.document && result?.geometry) accept(result);
+        else if(result?.kind==='placement'&&latest.current){
+          const placed=applyPlacementAck(latest.current,result);
+          if(placed)accept(placed);
+          else accept(await call<View>('inspect_document',{documentId:latest.current.document.id}));
+        }
         else if (result?.kind === 'context' && latest.current) {
           const merged=applyContextAck(latest.current,result);
           if(merged!==latest.current)accept(merged);
@@ -264,6 +276,8 @@ export function useCad() {
   return {
     closed,
     setEditorDirty,
+    setInteractionDirty,
+    reloadEditor:async()=>{await queue.current;return reloadEditor();},
     closeOtherEditors,
     closeEditor: async()=>{await queue.current;return closeEditor();},
     view,

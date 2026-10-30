@@ -145,7 +145,9 @@ outputSchemas.inspect_document_state = z.object({
   ),
   viewport: z.object({ position: vector, target: vector }).optional(),
   previewId: id.nullable(),
-});
+  dependencyKey:z.string().optional(),
+  placement:z.unknown().optional(),
+}).passthrough();
 outputSchemas.inspect_selection = z.object({
   revision: z.number().int(),
   selection: z.array(
@@ -322,6 +324,9 @@ for (const name of [
   "add_drawing_callout",
 ])
   outputSchemas[name] = view;
+// These overrides follow the general view registrations: rigid/display moves
+// acknowledge placements without serializing meshes.
+for(const name of ['set_component_transform','set_explode_offset','auto_explode'])outputSchemas[name]=z.object({document,geometry:view.shape.geometry.optional(),kind:z.literal('placement').optional()}).passthrough();
 outputSchemas.inspect_assembly = z.object({
   revision: z.number(),
   components: z.array(

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useReducer, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback,useEffect, useMemo, useReducer, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { SidebarResize } from "./SidebarResize.tsx";
-import { Euler, Quaternion, Vector3 } from 'three';
+import { Euler, Quaternion } from 'three';
 import { ChevronDown, Redo2, Undo2, PanelLeft, PanelRight, Maximize2, Plus, FolderOpen, Download, Pencil, Upload, Check as CheckIcon } from "lucide-react";
 import type { Component, Constraint, DisplayStyle, Frame, Geometry, Sketch, TopologyRef, Vec3, View } from "../cad/types.ts";
 import { displayStyleIds, displayStyles } from "../cad/appearance.ts";
@@ -18,6 +18,9 @@ import { SectionPanel, defaultSection, sectionCut, type SectionState } from "./p
 import { EquationsPanel } from "./panels/equations.tsx";
 import { MassPanel } from "./panels/mass.tsx";
 import { MotionPanel } from "./panels/motion.tsx";
+import type {MotionPreview} from '../cad/motion-preview.ts';
+import {editorRecovery} from '../cad/editor-recovery.ts';
+import {rigidDragDriver} from '../cad/rigid-motion.ts';
 import { CutListPanel } from "./panels/cutlist.tsx";
 import { InterferencePanel } from "./panels/interference.tsx";
 import { definitionOf } from "../cad/view-summary.ts";
@@ -115,6 +118,7 @@ export default function App() {
   const doc = view?.document;
   const [mode, setMode] = useState<Mode>("part"),
     [gizmoMode, setGizmoMode] = useState<'translate' | 'rotate' | null>(null),
+    [motionPreview,setMotionPreview]=useState<{spec:MotionPreview;phase:number}|null>(null),
     [dialog, setDialog] = useState<DialogState | null>(null),
     [selection, setSelection] = useState<Pick[]>([]),
     [dialogHighlight, setDialogHighlight] = useState<Highlight | null>(null),
@@ -193,6 +197,12 @@ export default function App() {
     picker = useRef<((p: Pick) => boolean) | null>(null),
     syncedSelection = useRef<string>("[]"),
     cameraTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const motionState=useRef<{spec:MotionPreview;phase:number}|null>(null);
+  const updateMotion=useCallback((preview:{spec:MotionPreview;phase:number}|null)=>{
+    const changed=JSON.stringify(motionState.current?.spec)!==JSON.stringify(preview?.spec);
+    motionState.current=preview;
+    if(changed)setMotionPreview(preview);else if(preview)viewport.current?.motionPhase(preview.phase);
+  },[]);
 
   // Per-document defaults: show the origin planes on an empty part; open
   // assemblies of inserted parts in the assembly workspace.
@@ -776,7 +786,7 @@ export default function App() {
     ],
     evaluate: [
       { key: "interference", icon: "interference", label: "Interference", disabled: components.length < 2, active: sidePanel === "interference", onClick: () => openPanel("interference") },
-      { key: "motion", icon: "motion", label: "Motion Check", disabled: !components.length, active: motionPanel, onClick: () => openMotion() },
+      { key: "motion", icon: "motion", label: "Motion", disabled: !components.length, active: motionPanel, onClick: () => openMotion() },
       { key: "mass", icon: "mass", label: "Mass Properties", disabled: !view?.geometry.bodies.length, active: massPanel, onClick: () => openMass() },
       sectionItem,
     ],
@@ -929,40 +939,22 @@ export default function App() {
   // -------------------------------------------------------------------------
   useEffect(()=>{cad.setEditorDirty(Boolean(dialog||editing||cad.pendingEdits));},[dialog,editing,cad.pendingEdits]);
   const assemblyGizmo = useMemo(() => {
-    if (mode !== "assembly" || dialog || explode>0) return undefined;
+    if (mode !== "assembly" || dialog || explode>0 || motionPreview) return undefined;
     const sel = selection.find((p) => p.kind === "body" || p.kind === "face" || p.kind === "edge" || p.kind === "component");
     const bodyId = sel?.kind === "body" ? sel.id : sel && (sel.kind === "face" || sel.kind === "edge") ? sel.ref.bodyId : undefined;
-    const c = components.find((x) => (bodyId && componentOwns(x, bodyId)) || (sel?.kind === "component" && x.id === sel.id));
+    const selected = components.find((x) => (bodyId && componentOwns(x, bodyId)) || (sel?.kind === "component" && x.id === sel.id));
+    const c=selected&&view?rigidDragDriver(view,selected.id):undefined;
     // Mated parts drag too: their mates keep only the free motion.
     if (!c || c.grounded) return undefined;
-    const members = new Set([c.id]);
     const topology = view?.geometry.bodies.flatMap(b => b.topology) ?? [];
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const m of doc?.mates ?? []) {
-        if (m.suppressed) continue;
-        const a = m.moving.bodyId.split('/')[0], b = m.target.bodyId.split('/')[0];
-        let rigid = m.type === 'lock';
-        if (m.type === 'gear' && m.value === 1 && m.aligned) {
-          const aa = topology.find(t => t.id === m.moving.id)?.axis;
-          const bb = topology.find(t => t.id === m.target.id)?.axis;
-          if (aa && bb) {
-            const n = new Vector3(...aa.direction).normalize(), nn = new Vector3(...bb.direction).normalize();
-            rigid = Math.abs(n.dot(nn)) > 0.999999 && new Vector3(...aa.origin).sub(new Vector3(...bb.origin)).cross(n).length() < 1e-5;
-          }
-        }
-        if (!rigid || (!members.has(a) && !members.has(b))) continue;
-        for (const id of [a, b]) if (!members.has(id) && components.some(x => x.id === id && !x.grounded)) { members.add(id); changed = true; }
-      }
-    }
-    const bodyIds = components.filter(x => members.has(x.id)).flatMap(bodiesOf);
+    const bodyIds = bodiesOf(c);
     const p = bodyIds[0] ? view?.geometry.placements?.[bodyIds[0]] : undefined;
-    const modeFor = gizmoMode ?? ((doc?.mates ?? []).some(m => m.type === 'concentric' && componentOwns(c, m.moving.bodyId)) ? 'rotate' : 'translate');
-    const hinge = (doc?.mates ?? []).find(m => !m.suppressed && m.type === 'concentric' && componentOwns(c, m.moving.bodyId));
+    const hinge = (doc?.mates ?? []).find(m => !m.suppressed && (m.type === 'concentric'||m.type==='gear') && componentOwns(c, m.moving.bodyId));
+    const modeFor = gizmoMode ?? (hinge ? 'rotate' : 'translate');
     const axis = hinge && topology.find(t => t.id === hinge.moving.id)?.axis?.direction;
-    return { componentId: c.id, bodyIds, position: (p?.position ?? c.position) as Vec3, quaternion: p?.quaternion, mode: modeFor, axis };
-  }, [mode, dialog, gizmoMode, JSON.stringify(selection.map(pickId)), JSON.stringify(components), view?.geometry.placements]);
+    const ownPose=bodiesOf(c).map(id=>view?.geometry.placements?.[id]).find(Boolean)??p;
+    return { componentId: c.id, bodyIds, position: (ownPose?.position ?? c.position) as Vec3, quaternion: ownPose?.quaternion, mode: modeFor, axis };
+  }, [mode, dialog, gizmoMode, motionPreview, JSON.stringify(selection.map(pickId)), JSON.stringify(components), view?.geometry.placements]);
 
   const documentMenu = (x: number, y: number) => {
     const items: MenuItem[] = [
@@ -1047,6 +1039,7 @@ export default function App() {
       ],
     });
 
+  if(cad.closed)return <main className="editor-recovery"><p>The 3D view has been released. The host may still need you to close its tab with ×.</p><ol>{editorRecovery.map(step=><li key={step}>{step}</li>)}</ol></main>;
   return (
     <main className={`app ${cad.busy ? "busy" : ""}`}>
       <header className="topbar">
@@ -1168,9 +1161,11 @@ export default function App() {
               registerPicker={(h) => (picker.current = h)}
               setHighlight={setDialogHighlight}
               onClose={() => {
+                setMotionPreview(null);
                 picker.current = null;
                 setSidePanel(null);
               }}
+              onPreview={updateMotion}
             />
           ) : view && massPanel && !dialog && mode !== "drawing" ? (
             <MassPanel
@@ -1290,6 +1285,12 @@ export default function App() {
             <Viewport
               ref={viewport}
               view={view}
+              motion={motionPreview}
+              interactionDisabled={cad.busy}
+              onInteraction={cad.setInteractionDirty}
+              directDragEnabled={mode==='assembly'&&!dialog&&!editing&&explode===0&&!motionPreview}
+              directDragMode={gizmoMode??undefined}
+              onComponentSelected={id=>setSelection([{kind:'component',id}])}
               highlight={highlight}
               ghost={ghost ?? (view?.preview && !dialog ? view.preview.geometry : null)}
               solidPreview={!!dialog}
@@ -1346,12 +1347,14 @@ export default function App() {
                 const shown = c?.expression ? `=${c.expression}` : length ? formatLength(value) : formatMm(value);
                 setValueEditor({ constraintId, value: shown, length, x, y });
               }}
-              onComponentDrag={(componentId, delta, rotation) => {
+              onComponentDrag={async(componentId, delta, rotation) => {
                 const c = components.find((x) => x.id === componentId);
-                if (c && assemblyGizmo) {
-                  const baseQ = assemblyGizmo.quaternion ? new Quaternion(...assemblyGizmo.quaternion) : new Quaternion().setFromEuler(new Euler(...c.rotation.map(x => x * Math.PI / 180) as Vec3, 'XYZ'));
+                if (c) {
+                  const pose=bodiesOf(c).map(id=>view?.geometry.placements?.[id]).find(Boolean);
+                  const baseQ = pose ? new Quaternion(...pose.quaternion) : new Quaternion().setFromEuler(new Euler(...c.rotation.map(x => x * Math.PI / 180) as Vec3, 'XYZ'));
                   const e = new Euler().setFromQuaternion(new Quaternion(...rotation).multiply(baseQ), 'XYZ');
-                  void cad.run('set_component_transform', { componentId, position: assemblyGizmo.position.map((v, i) => v + delta[i]), rotation: [e.x, e.y, e.z].map(x => x * 180 / Math.PI) });
+                  const saved=await cad.run('set_component_transform', { componentId, position: (pose?.position??c.position).map((v, i) => v + delta[i]), rotation: [e.x, e.y, e.z].map(x => x * 180 / Math.PI) });
+                  if(!saved)throw Error('Placement was not saved');
                 }
               }}
             />
@@ -1371,6 +1374,7 @@ export default function App() {
           <div className="view-controls">
             <button className="text-button" onClick={()=>void cad.closeOtherEditors()}>Close other editors</button>
             <button className="text-button" disabled={Boolean(dialog||editing||cad.pendingEdits)} onClick={()=>void cad.closeEditor().catch(e=>cad.setError((e as Error).message))}>Close editor</button>
+            <button className="text-button" disabled={Boolean(dialog||editing||cad.pendingEdits)} onClick={()=>void cad.reloadEditor().catch(e=>cad.setError((e as Error).message))}>Reload editor</button>
             {assemblyGizmo && <>
               <button className={`text-button ${assemblyGizmo.mode === 'translate' ? 'on' : ''}`} onClick={() => setGizmoMode('translate')} disabled={cad.busy}>Move part</button>
               <button className={`text-button ${assemblyGizmo.mode === 'rotate' ? 'on' : ''}`} onClick={() => setGizmoMode('rotate')} disabled={cad.busy}>Rotate part</button>
@@ -1543,8 +1547,7 @@ export default function App() {
           {doc?.features.map((f) => {
             const I = Icons[featureIcon(f)];
             const selected = selection.some((p) => p.kind === "feature" && p.id === f.id);
-            if(cad.closed)return <div className="empty-state"><p>This editor is closed. The saved design is retained.</p></div>;
-  return (
+            return (
               <button
                 key={f.id}
                 className={`timeline-item ${selected ? "on" : ""} ${f.suppressed ? "dim" : ""} ${ownerOf(hovered) === f.id ? "hovered" : ""}`}

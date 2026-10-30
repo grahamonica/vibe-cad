@@ -588,6 +588,10 @@ export interface ThreadRecord {
   leftHand?: boolean;
 }
 export interface Geometry {
+  /** Identity of the cached shape set; rigid placement changes keep it. */
+  shapeKey?: string;
+  /** The last committed change updated placements without rebuilding solid features. */
+  placementOnly?: boolean;
   /** Linked part revisions, so an assembly refreshes even when only its source part changed. */
   dependencyKey?: string;
   bodies: RenderBody[];

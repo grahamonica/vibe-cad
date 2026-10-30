@@ -8,14 +8,22 @@ import { CadScene, palette, type Orientation, type ScenePick } from "./scene.ts"
 import { SketchSession, type SketchOp, type SketchTool } from "../sketch/session.ts";
 import { entityPolyline } from "../sketch/model.ts";
 import type { Pick } from "../panels/dialogs.tsx";
+import type {MotionPreview} from '../../cad/motion-preview.ts';
 
 export interface ViewportHandle {
+  motionPhase:(phase:number)=>void;
   orient(o: Orientation): void;
   normalTo(frame: Frame): void;
   lookAlong(direction: Vec3): void;
   session(): SketchSession | undefined;
 }
 export interface ViewportProps {
+  interactionDisabled?:boolean;
+  directDragEnabled?:boolean;
+  directDragMode?:'rotate'|'translate';
+  onComponentSelected?:(id:string)=>void;
+  onInteraction?:(active:boolean)=>void;
+  motion?: {spec:MotionPreview;phase:number}|null;
   view: View | null;
   highlight: { refs: TopologyRef[]; planes: string[] };
   ghost: Geometry | null;
@@ -46,7 +54,7 @@ export interface ViewportProps {
   onSketchCommit: (ops: SketchOp[], reason?: string) => Promise<Sketch | undefined>;
   onSketchChange: () => void;
   onEditValue: (constraintId: string, value: number, at: [number, number]) => void;
-  onComponentDrag?: (componentId: string, delta: Vec3, rotation: [number, number, number, number]) => void;
+  onComponentDrag?: (componentId: string, delta: Vec3, rotation: [number, number, number, number]) => void|Promise<void>;
 }
 const toWorld = (f: Frame, p: Vec2) =>
   new THREE.Vector3(...f.origin)
@@ -64,7 +72,9 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
     [sceneEpoch, setSceneEpoch] = useState(0),
     autoRecoveries = useRef(0);
   propsRef.current = props;
+  const motionPhaseRef=useRef(0),motionSpecRef=useRef<string|undefined>(undefined);
   useImperativeHandle(handle, () => ({
+    motionPhase:phase=>{motionPhaseRef.current=phase;try{sceneRef.current?.previewMotion(phase);}catch(error){setFailed(error instanceof Error?error.message:'Motion preview stopped');}},
     orient: (o) => sceneRef.current?.orient(o),
     normalTo: (f) => sceneRef.current?.normalTo(f),
     lookAlong: (d) => sceneRef.current?.lookAlong(d),
@@ -100,6 +110,8 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
     };
     scene.onCameraChange = (position, target, up, zoom) => propsRef.current.onCamera(position, target, up, zoom);
     scene.onComponentDrag = (id, delta, rotation) => propsRef.current.onComponentDrag?.(id, delta, rotation);
+    scene.onInteraction=active=>propsRef.current.onInteraction?.(active);
+    scene.onComponentSelected=id=>propsRef.current.onComponentSelected?.(id);
     const canvas = scene.renderer.domElement;
     let down: { x: number; y: number; button: number } | undefined;
     const toPick = (e: PointerEvent | MouseEvent): Pick | null => {
@@ -147,6 +159,7 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
       return best;
     };
     const onDown = (e: PointerEvent) => {
+      if(propsRef.current.motion)return;
       down = { x: e.clientX, y: e.clientY, button: e.button };
       const session = sessionRef.current;
       if (session && e.button === 0 && !scene.cubeHit(e.clientX, e.clientY)) {
@@ -154,6 +167,7 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
       }
     };
     const onMove = (e: PointerEvent) => {
+      if(propsRef.current.motion)return;
       scene.cubeHover(e.clientX, e.clientY);
       const session = sessionRef.current;
       if (session) {
@@ -167,6 +181,7 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
       propsRef.current.onHover?.(pick);
     };
     const onUp = (e: PointerEvent) => {
+      if(propsRef.current.motion)return;
       const start = down;
       down = undefined;
       const moved = start ? Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4 : true;
@@ -246,14 +261,27 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
       displayStyle: props.displayStyle,
     });
     sceneRef.current?.setExplode(props.explode ?? 0, props.explodeOffsets);
-    if (props.gizmo) sceneRef.current?.attachGizmo(props.gizmo.componentId, props.gizmo.bodyIds, props.gizmo.position, props.gizmo.mode, props.gizmo.axis);
+    if(props.motion){sceneRef.current?.beginMotion(props.motion.spec);sceneRef.current?.previewMotion(motionPhaseRef.current);}
+    else if(props.gizmo)sceneRef.current?.attachGizmo(props.gizmo.componentId,props.gizmo.bodyIds,props.gizmo.position,props.gizmo.mode,props.gizmo.axis);
     sceneRef.current?.setSelection(props.highlight.refs, props.highlight.planes);
     } catch (error) {
       sceneRef.current?.dispose();sceneRef.current=null;
       setFailed(error instanceof Error ? error.message : 'The 3D view could not be displayed.');
     }
-  }, [sceneEpoch, geometryKey, props.ghost, props.solidPreview, props.fadeBodies, JSON.stringify(props.gizmo), [...(props.hiddenBodies ?? [])].join(), props.tangentEdges, props.displayStyle]);
+  }, [sceneEpoch, geometryKey, props.ghost, props.solidPreview, props.fadeBodies, [...(props.hiddenBodies ?? [])].join(), props.tangentEdges, props.displayStyle]);
+  useEffect(()=>{const scene=sceneRef.current,g=props.gizmo;if(!scene||props.motion)return;if(g)scene.attachGizmo(g.componentId,g.bodyIds,g.position,g.mode,g.axis);else scene.clearGizmo();},[sceneEpoch,geometryKey,JSON.stringify(props.gizmo),!!props.motion]);
   // Exploding only moves bodies.
+  useEffect(()=>{if(sceneRef.current){sceneRef.current.interactionDisabled=!!props.interactionDisabled;sceneRef.current.transform.enabled=!props.interactionDisabled;sceneRef.current.directDragEnabled=!!props.directDragEnabled;sceneRef.current.directDragMode=props.directDragMode;}},[sceneEpoch,props.interactionDisabled,props.directDragEnabled,props.directDragMode]);
+  useEffect(()=>{
+    const key=JSON.stringify(props.motion?.spec);if(key!==motionSpecRef.current){motionSpecRef.current=key;motionPhaseRef.current=props.motion?.phase??0;}
+    try{sceneRef.current?.beginMotion(props.motion?.spec??null);sceneRef.current?.previewMotion(motionPhaseRef.current);}
+    catch(error){setFailed(error instanceof Error?error.message:'Motion preview could not start');}
+  },[sceneEpoch,geometryKey,JSON.stringify(props.motion?.spec)]);
+  useEffect(()=>{
+    motionPhaseRef.current=props.motion?.phase??0;
+    try{sceneRef.current?.previewMotion(motionPhaseRef.current);}
+    catch(error){setFailed(error instanceof Error?error.message:'Motion preview stopped');}
+  },[props.motion?.phase]);
   useEffect(() => {
     sceneRef.current?.setExplode(props.explode ?? 0, props.explodeOffsets);
   }, [sceneEpoch, props.explode, JSON.stringify(props.explodeOffsets)]);
