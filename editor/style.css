@@ -1373,29 +1373,24 @@ input[type="range"] {
   .workspace.no-left,
   .workspace.no-right,
   .workspace.no-left.no-right {
-    --left-panel-size: min(var(--left-width, 264px), 86vw);
-    --right-panel-size: min(var(--right-width, 284px), 86vw);
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 0.85fr);
     position: relative;
   }
+  .workspace.no-left.no-right { grid-template-rows: minmax(0, 1fr) 0; }
+  .workspace .center { grid-column: 1 / -1; grid-row: 1; }
   .left,
   .right {
-    position: absolute;
-    z-index: 12;
-    top: 40px;
-    bottom: 0;
+    position: static;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: auto;
+    border-top: 1px solid var(--line);
   }
-  .left {
-    left: 0;
-    width: var(--left-panel-size);
-  }
-  .right {
-    right: 0;
-    width: var(--right-panel-size);
-  }
-  .sidebar-resizer {
-    top: 40px;
-  }
+  .workspace:not(.no-left):not(.no-right) .left { grid-column: 1; }
+  .workspace:not(.no-left):not(.no-right) .right { grid-column: 2; }
+  .sidebar-resizer { display: none; }
+  .view-controls { right: 6px; flex-wrap: wrap; }
   .no-left .left,
   .no-right .right {
     display: none;

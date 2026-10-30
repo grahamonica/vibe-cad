@@ -374,11 +374,21 @@ export class CadScene {
   }
   private resize() {
     const rect = this.host.getBoundingClientRect();
+    if(rect.width<2 || rect.height<2)return;
+    const previousAspect = this.size.width / this.size.height;
+    const initialized = this.size.width > 1 && this.size.height > 1;
     this.size = { width: Math.max(1, rect.width), height: Math.max(1, rect.height) };
     this.renderer.setPixelRatio(renderPixelRatio(this.size.width, this.size.height, window.devicePixelRatio));
     this.renderer.setSize(this.size.width, this.size.height);
     const aspect = this.size.width / this.size.height,
       h = 100;
+    // Preserve framing when a panel or host resize changes the shorter view
+    // dimension; resizing the canvas must not crop a previously fitted model.
+    if (initialized) {
+      const ratio=Math.min(1,aspect) / Math.min(1,previousAspect);
+      this.camera.zoom *= ratio;
+      if(this.tween){this.tween.from.zoom*=ratio;this.tween.to.zoom*=ratio;}
+    }
     this.camera.left = (-h * aspect) / 2;
     this.camera.right = (h * aspect) / 2;
     this.camera.top = h / 2;

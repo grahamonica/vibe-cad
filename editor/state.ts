@@ -143,6 +143,7 @@ export function useCad() {
       if (
         !editorAlive() || !current ||
         pendingRef.current ||
+        !['idle','paused'].includes(buildRef.current.state) ||
         transferRef.current.active ||
         transferRef.current.error ||
         document.hidden || polling
@@ -154,6 +155,7 @@ export function useCad() {
           const now = latest.current;
           if (
             pendingRef.current ||
+            !['idle','paused'].includes(buildRef.current.state) ||
             !now ||
             now.document.id !== state.documentId ||
             (state.revision === now.document.revision &&

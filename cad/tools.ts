@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { designChanges, applyDesignChanges, designJSON } from "./design-json.ts";
+import { checkSheetFeatures } from './sheet-features.ts';
 import { materialProps } from "./material-schema.ts";
 import { findTopology } from "./topology-key.ts";
 import { allComponents, componentOf, componentOwns, snapshot } from "./types.ts";
@@ -294,7 +295,7 @@ export function toolset(store: Store) {
     d.features.push(f);
     return f;
   };
-  add('engine_info','CAD engine version','Read the running engine version and supported fast-edit, motion and editor lifecycle capabilities.',{},true,async()=>({version:'1.1.6',capabilities:['typed-design-json','atomic-bulk-edits','motion-intent','mate-travel-limits','editor-session-close','incremental-gpu-geometry','graphics-context-recovery','lightweight-camera-selection','cached-rigid-motion','live-part-drag','live-motion-playback','placement-only-replies','live-editor-reload','bounded-view-transfer','event-driven-rendering','host-teardown-acknowledgement']}));
+  add('engine_info','CAD engine version','Read the running engine version and supported fast-edit, motion and editor lifecycle capabilities.',{},true,async()=>({version:'1.1.7',capabilities:['typed-design-json','atomic-bulk-edits','motion-intent','mate-travel-limits','editor-session-close','incremental-gpu-geometry','graphics-context-recovery','lightweight-camera-selection','cached-rigid-motion','live-part-drag','live-motion-playback','placement-only-replies','live-editor-reload','bounded-view-transfer','event-driven-rendering','host-teardown-acknowledgement']}));
   add('manage_editors','Manage open CAD editors','List renderer liveness, request close or reload of a live panel, or close other saved editors. Unsaved drafts are protected. closeRequested is not proof that the host closed a tab: closed is true only after teardown_ack. Unresponsive panels require the supplied user recovery instructions; no dead-panel host control is available. register/heartbeat/teardown_ack are renderer lifecycle operations.',
     {action:z.enum(['list','register','heartbeat','close','close_others','reload','teardown_ack','forget','resume']),sessionId:id.optional(),documentId:id.optional(),dirty:z.boolean().default(false),confirmHostClosed:z.boolean().default(false).describe('For forget only: true only after the user confirms closing that host tab with ×. Forget removes a stale registry record and never closes a tab.')},false,
     async(a,source)=>{if(a.action==='teardown_ack'&&source!=='user')throw Error('Only the renderer host teardown callback can acknowledge closure');return store.editors.update(a.action,a.sessionId,a.documentId,a.dirty,a.confirmHostClosed);});
@@ -398,6 +399,10 @@ export function toolset(store: Store) {
       return { revision: v.document.revision, ...result };
     },
   );
+  add('check_sheet_features','Minimum sheet features',
+    'Screen a uniform planar sheet for narrow material webs and cut gaps using bounded normal-ray sampling of its current tessellated edges. Returns actual edge references, widths and uncertainty; not a certified global minimum or supplier approval. Native zero-volume/invalid features are rejected during kernel rebuilding. No model edits, booleans or additional kernel analysis.',
+    {...base,bodyId:id,minimumWeb:z.number().min(0.05).max(100).default(1.6),minimumGap:z.number().min(0.05).max(100).default(1.6),maxFindings:z.number().int().min(1).max(40).default(6)},true,
+    async a=>{const view=await store.view(await store.read(a.documentId)),body=view.geometry.bodies.find(b=>b.id===a.bodyId);if(!body)throw Error('Body not found');return {revision:view.document.revision,...checkSheetFeatures(body,a.minimumWeb,a.minimumGap,a.maxFindings)};});
   add(
     "set_selection",
     "Select CAD geometry",

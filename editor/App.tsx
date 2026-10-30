@@ -23,6 +23,7 @@ import {editorRecovery} from '../cad/editor-recovery.ts';
 import {rigidDragDriver} from '../cad/rigid-motion.ts';
 import { CutListPanel } from "./panels/cutlist.tsx";
 import { InterferencePanel } from "./panels/interference.tsx";
+import { SheetFeaturesPanel } from './panels/sheet-features.tsx';
 import { definitionOf } from "../cad/view-summary.ts";
 import { SketchPatternPanel } from "./panels/sketch-pattern.tsx";
 import { DrawingEditor, DrawingProperties, DrawingTree, type DrawingTool, type DrawingSelection } from "./drawing/DrawingEditor.tsx";
@@ -140,7 +141,7 @@ export default function App() {
     [section, setSection] = useState<SectionState | null>(null),
     [sectionPanel, setSectionPanel] = useState(false),
     // The panel shown in place of the tree: equations, mass properties, motion check or cut list.
-    [sidePanel, setSidePanel] = useState<"equations" | "mass" | "motion" | "cutlist" | "interference" | null>(null),
+    [sidePanel, setSidePanel] = useState<"equations" | "mass" | "motion" | "cutlist" | "interference" | "sheetFeatures" | null>(null),
     // Isolate: only these components shown; display style and tangent edges (remembered on this computer).
     [isolated, setIsolated] = useState<string[] | null>(null),
     [displayStyle, setDisplayStyle] = useState<DisplayStyle>(() => {
@@ -760,6 +761,7 @@ export default function App() {
     ],
     evaluate: [
       { key: "mass", icon: "mass", label: "Mass Properties", disabled: noBodies, active: massPanel, onClick: () => openMass() },
+      { key: "sheetFeatures", icon: "measure", label: "Minimum Features", disabled: noBodies, active: sidePanel === 'sheetFeatures', onClick: () => openPanel('sheetFeatures') },
       { key: "equations", icon: "equations", label: "Equations", active: equationsPanel, onClick: () => openEquations() },
       sectionItem,
     ],
@@ -788,6 +790,7 @@ export default function App() {
       { key: "interference", icon: "interference", label: "Interference", disabled: components.length < 2, active: sidePanel === "interference", onClick: () => openPanel("interference") },
       { key: "motion", icon: "motion", label: "Motion", disabled: !components.length, active: motionPanel, onClick: () => openMotion() },
       { key: "mass", icon: "mass", label: "Mass Properties", disabled: !view?.geometry.bodies.length, active: massPanel, onClick: () => openMass() },
+      { key: "sheetFeatures", icon: "measure", label: "Minimum Features", disabled: !view?.geometry.bodies.length, active: sidePanel === 'sheetFeatures', onClick: () => openPanel('sheetFeatures') },
       sectionItem,
     ],
   };
@@ -1182,6 +1185,8 @@ export default function App() {
             <EquationsPanel cad={cad} view={view} onClose={() => setSidePanel(null)} />
           ) : view && sidePanel === "cutlist" && !dialog && mode === "part" ? (
             <CutListPanel cad={cad} view={view} onClose={() => setSidePanel(null)} />
+          ) : view && sidePanel === 'sheetFeatures' && !dialog && mode !== 'drawing' ? (
+            <SheetFeaturesPanel key={view.document.id} cad={cad} view={view} setHighlight={setDialogHighlight} onClose={()=>{setSidePanel(null);setDialogHighlight(null);}}/>
           ) : view && sidePanel === "interference" && !dialog && mode === "assembly" ? (
             <InterferencePanel
               cad={cad}

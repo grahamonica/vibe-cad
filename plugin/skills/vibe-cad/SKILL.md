@@ -53,6 +53,8 @@ Use direct assembly dragging for live motion, or Evaluate > Motion for play/paus
 
 ## Build with `run_steps`
 
+Before fabricating detailed sheet artwork, run `check_sheet_features` for each cut body with the supplier's minimum web and cut-gap widths. Evaluate > Minimum Features exposes the same explicit check. It uses bounded sampling of cached edges, reports approximate widths, actual edge references, disconnected material regions and uncertainty, and never edits the part. Its no-narrow-features result is a screening result, not a certified global minimum or supplier approval. Review reported slivers, narrow necks and gaps; do not automatically erase meaningful details. Use smooth arcs with bounded fitting error for narrow artwork: unconstrained interpolating splines can overshoot and create fragile slivers or detached islands. Keep dimensioned tabs, slots and mounting geometry separate. Native kernel validation already rejects zero-volume and invalid native feature results; imported or unsupported geometry requires separate review.
+
 Use `run_steps` for any sequence of operations: one request instead of many calls or screenshots.
 
 The model's direct tool list intentionally contains the main document, editor, sketch, build, inspection and export tools. The editor has every typed operation. For specialist operations listed below, request their exact schemas with `get_tool_schema`, then use their names and validated arguments in `run_steps`. An operation absent from the direct list is still usable through the batch. Never fall back to a shell or the retired development app.
