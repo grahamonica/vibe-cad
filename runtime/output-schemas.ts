@@ -204,6 +204,7 @@ outputSchemas.list_materials = materialList;
 outputSchemas.save_material = materialList;
 outputSchemas.delete_material = materialList;
 outputSchemas.engine_info=z.object({version:z.string(),capabilities:z.array(z.string())});
+for (const name of ['set_viewport','set_selection']) outputSchemas[name]=z.object({kind:z.literal('context'),document:z.object({id,revision:z.number().int(),selection:document.shape.selection,viewport:z.object({position:z.array(z.number()),target:z.array(z.number()),up:z.array(z.number()).optional(),zoom:z.number().optional()}).optional()})});
 outputSchemas.manage_editors=z.object({limit:z.number(),closeRequested:z.boolean(),editors:z.array(z.object({sessionId:id,documentId:id,closed:z.boolean(),dirty:z.boolean()}).passthrough())}).passthrough();
 outputSchemas.inspect_design=z.object({design:z.object({id,revision:z.number()}).passthrough(),linked:z.array(z.object({id,revision:z.number()}).passthrough()).optional()});
 outputSchemas.validate_design=z.object({valid:z.boolean(),level:z.string(),revision:z.number(),milliseconds:z.number()}).passthrough();

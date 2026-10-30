@@ -14,7 +14,7 @@ after(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 test("MCP handshake, typed tools, annotations, self-contained UI resource, mutations and schema errors", async () => {
-  const server = createMcp(new Store(dir)),
+  const store = new Store(dir), server = createMcp(store),
     client = new Client({ name: "CAD integration test", version: "1.0.0" });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await server.connect(a);
@@ -76,6 +76,18 @@ test("MCP handshake, typed tools, annotations, self-contained UI resource, mutat
     const id = (doc.structuredContent as any).document.id;
     const opened = await client.callTool({ name: "open_cad", arguments: { documentId: id } });
     assert.equal(opened._meta?.["openai/outputTemplate"], uiUri);
+    for(const [name,args] of [['set_viewport',{position:[0,0,200],target:[0,0,0]}],['set_selection',{refs:[]}]] as const) {
+      const original=store.view;
+      if(name==='set_viewport')store.view=async()=>{throw Error('Camera saves must not load geometry');};
+      const ack=await client.callTool({name,arguments:{documentId:id,...args},_meta:{'vibe-cad/source':'user'}});
+      store.view=original;
+      assert.ok(!ack.isError,JSON.stringify(ack));
+      assert.equal((ack.structuredContent as any).kind,'context');
+      assert.equal((ack.structuredContent as any).geometry,undefined);
+      assert.equal(ack._meta?.view,undefined);
+      assert.equal(ack._meta?.viewChunks,undefined);
+      assert.ok(JSON.stringify(ack).length<2000,'Camera and selection must not retransmit the assembly');
+    }
     const badVector = await client.callTool({
       name: "create_sketch",
       arguments: { documentId: id, expectedRevision: 0, plane: "XY", origin: [0, 0] },

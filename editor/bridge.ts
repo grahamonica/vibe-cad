@@ -16,6 +16,7 @@ export interface ViewTransfer {
 }
 let transferListener: ((state: ViewTransfer) => void) | undefined;
 let transferGeneration = 0;
+let completeDocumentId: string | undefined;
 export function onTransfer(fn: (state: ViewTransfer) => void) {
   transferListener = fn;
 }
@@ -41,7 +42,7 @@ export async function closeOtherEditors(){await editorRegistry('close_others');}
 export async function initialize() {
   if (ready) return ready;
   app = new App(
-    { name: "Vibe CAD", version: "1.1.1" },
+    { name: "Vibe CAD", version: "1.1.2" },
     { availableDisplayModes: ["inline", "fullscreen"] },
     { autoResize: false },
   );
@@ -72,6 +73,7 @@ async function readToolView(
   if (meta?.view) {
     transferGeneration++;
     transferListener?.({ active: false, received: 0, total: 0 });
+    completeDocumentId=(meta.view as View).document.id;
     return meta.view as View;
   }
   const snapshot = meta?.viewChunks as
@@ -86,6 +88,7 @@ async function readToolView(
   )
     throw Error("Invalid CAD editor snapshot");
   const generation = ++transferGeneration;
+  const replacing = completeDocumentId === (snapshot.documentId ?? hintDocumentId);
   let index = 0,
     received = 0,
     total = 0,
@@ -128,17 +131,18 @@ async function readToolView(
       received = count;
       total = bodyCount;
       transferListener?.({ active: true, received, total });
-      if (
+      if (!replacing && (
         count <= 1 ||
         count === bodyCount ||
         performance.now() - publishedAt > 80
-      ) {
+      )) {
         publishedAt = performance.now();
         listener?.(partial);
       }
     });
     if (generation !== transferGeneration) return;
     transferListener?.({ active: false, received, total });
+    completeDocumentId=view.document.id;
     return view;
   } catch (e) {
     if (generation !== transferGeneration) return;

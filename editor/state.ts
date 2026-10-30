@@ -1,6 +1,7 @@
 // Document state, serialized command execution and external-change polling.
 import { useEffect, useRef, useState } from "react";
 import type { View } from "../cad/types.ts";
+import { applyContextAck } from './context-ack.ts';
 import {
   call,
   context,
@@ -213,6 +214,10 @@ export function useCad() {
       try {
         const result = await call<any>(name, full);
         if (result?.document && result?.geometry) accept(result);
+        else if (result?.kind === 'context' && latest.current) {
+          const merged=applyContextAck(latest.current,result);
+          if(merged!==latest.current)accept(merged);
+        }
         return result as T;
       } catch (e) {
         const message = (e as Error).message;

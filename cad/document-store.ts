@@ -493,6 +493,14 @@ export class DocumentStore {
       return this.view(next);
     });
   }
+  async setViewport(id: string, viewport: NonNullable<Document['viewport']>) {
+    return this.locked(id, async () => {
+      const doc=await this.read(id);
+      doc.viewport=viewport;
+      await this.persistence.commit(doc,doc.revision);
+      return {document:{id:doc.id,revision:doc.revision,selection:doc.selection,viewport:doc.viewport}};
+    });
+  }
   async setContext(
     id: string,
     selection: Document["selection"],

@@ -97,6 +97,7 @@ interface BodyRecord {
 const recordObjects = (r: BodyRecord) =>
   [r.mesh, r.edges, r.outline?.lines, r.hiddenLines, r.highlight].filter((o): o is THREE.Mesh | LineSegments2 => !!o);
 interface CameraTween {
+  notify?: boolean;
   from: { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3; zoom: number };
   to: { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3; zoom: number };
   start: number;
@@ -324,10 +325,11 @@ export class CadScene {
       this.camera.updateProjectionMatrix();
       this.camera.lookAt(target);
       if (t >= 1) {
+        const notify=this.tween.notify;
         this.tween = undefined;
         this.camera.up.copy(to.up);
         this.controls.update();
-        this.emitCamera();
+        if(notify !== false)this.emitCamera();
       }
       this.needsRender = true;
     } else this.controls.update();
@@ -404,7 +406,7 @@ export class CadScene {
       w = this.camera.right - this.camera.left;
     return Math.min(h, w) / (radius * 2.4);
   }
-  orient(type: Orientation, animate = true) {
+  orient(type: Orientation, animate = true, notify = true) {
     const box = this.contentBox(),
       sphere = box.getBoundingSphere(new THREE.Sphere());
     const dir =
@@ -412,7 +414,7 @@ export class CadScene {
         ? this.camera.position.clone().sub(this.controls.target).normalize()
         : new THREE.Vector3(...cameraFor(type).dir).normalize();
     const up = type === "fit" ? this.camera.up.clone() : new THREE.Vector3(...cameraFor(type).y);
-    this.moveCamera(dir, sphere.center, up, this.zoomFor(Math.max(sphere.radius, 5)), animate);
+    this.moveCamera(dir, sphere.center, up, this.zoomFor(Math.max(sphere.radius, 5)), animate, notify);
   }
   /** Look straight at a plane (sketch "normal to"). */
   normalTo(frame: Frame, animate = true, keepZoom = false) {
@@ -430,7 +432,7 @@ export class CadScene {
     const dir = new THREE.Vector3(...direction).normalize();
     this.moveCamera(dir, this.controls.target.clone(), upFor(dir), this.camera.zoom, animate);
   }
-  private moveCamera(dir: THREE.Vector3, target: THREE.Vector3, up: THREE.Vector3, zoom: number, animate: boolean) {
+  private moveCamera(dir: THREE.Vector3, target: THREE.Vector3, up: THREE.Vector3, zoom: number, animate: boolean, notify = true) {
     const distance = 2000;
     const to = {
       position: target.clone().addScaledVector(dir, distance),
@@ -447,10 +449,11 @@ export class CadScene {
       this.camera.lookAt(to.target);
       this.controls.update();
       this.invalidate();
-      this.emitCamera();
+      if(notify)this.emitCamera();
       return;
     }
     this.tween = {
+      notify,
       from: {
         position: this.camera.position.clone(),
         target: this.controls.target.clone(),

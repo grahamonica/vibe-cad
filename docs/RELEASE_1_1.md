@@ -1,5 +1,11 @@
 # Vibe CAD 1.1
 
+## 1.1.2 camera and selection traffic
+
+Camera saves now commit metadata without requesting solid geometry, and camera/selection replies acknowledge only the updated context. The editor merges same-revision acknowledgements while retaining its geometry objects; an acknowledgement for a different revision cannot relabel stale geometry. Automatic initial framing does not save a camera change. Warm geometry updates retain the previous complete view until the replacement stream completes.
+
+This removes a camera-save/full-assembly-stream/automatic-fit feedback path observed during native testing after a second host renderer crash. Regression checks forbid a geometry lookup for camera saves and limit context replies to small metadata responses. This is an additional fix; the native host still needs verification after activating 1.1.2.
+
 ## 1.1.1 graphics recovery
 
 Streaming an assembly now retains GPU buffers for unchanged bodies instead of rebuilding every previously received body for each chunk. Framebuffer dimensions and estimated geometry allocations are bounded before upload. Closing a scene releases the environment render target, triad textures, section materials, and graphics context. A lost WebGL context gets one automatic recreation; repeated failures offer a Restore action without discarding the current editor document. React errors have a reload screen.

@@ -294,7 +294,7 @@ export function toolset(store: Store) {
     d.features.push(f);
     return f;
   };
-  add('engine_info','CAD engine version','Read the running engine version and supported fast-edit, motion and editor lifecycle capabilities.',{},true,async()=>({version:'1.1.1',capabilities:['typed-design-json','atomic-bulk-edits','motion-intent','mate-travel-limits','editor-session-close','incremental-gpu-geometry','graphics-context-recovery']}));
+  add('engine_info','CAD engine version','Read the running engine version and supported fast-edit, motion and editor lifecycle capabilities.',{},true,async()=>({version:'1.1.2',capabilities:['typed-design-json','atomic-bulk-edits','motion-intent','mate-travel-limits','editor-session-close','incremental-gpu-geometry','graphics-context-recovery','lightweight-camera-selection']}));
   add('manage_editors','Manage open CAD editors','List live editor panels, close a panel, or close unused editors except the current document/session. Unsaved drafts are protected. Editors request host teardown and release their renderer when retired.',
     {action:z.enum(['list','register','heartbeat','close','close_others']),sessionId:id.optional(),documentId:id.optional(),dirty:z.boolean().default(false)},false,
     async a=>store.editors.update(a.action,a.sessionId,a.documentId,a.dirty));
@@ -474,8 +474,7 @@ export function toolset(store: Store) {
     { ...base, position: vec3, target: vec3, up: nonzero.optional(), zoom: positive.optional() },
     false,
     async (a) => {
-      const d = await store.read(a.documentId);
-      return store.setContext(a.documentId, d.selection, {
+      return store.setViewport(a.documentId, {
         position: a.position,
         target: a.target,
         ...(a.up ? { up: a.up } : {}),

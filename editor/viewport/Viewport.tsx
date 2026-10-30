@@ -274,7 +274,7 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
       if (v.document.viewport) scene.restoreCamera(v.document.viewport.position, v.document.viewport.target, v.document.viewport.up, v.document.viewport.zoom);
     }
     // Refit after the streamed assembly settles, rather than centering permanently on its first body.
-    const timer = setTimeout(() => scene.orient(v.document.viewport ? 'fit' : 'iso', false), 300);
+    const timer = setTimeout(() => scene.orient(v.document.viewport ? 'fit' : 'iso', false, false), 300);
     return () => clearTimeout(timer);
   }, [sceneEpoch, props.view?.document.id, props.view?.geometry.bodies.length]);
   // Datum planes.
