@@ -1,7 +1,7 @@
 import init from "replicad-opencascadejs";
 import {importColoredStep} from "./step-appearance.ts";
 import { STL_TRIANGLE_LIMIT, stlTriangleCount } from "./stl.ts";
-import { trimActiveCache } from "./active-cache.ts";
+import { trimActiveCache, trimCostedCache } from "./active-cache.ts";
 import { eigenvalues, type Tensor } from "./mass.ts";
 import { axesFor } from "./frame.ts";
 import { defaultPrintWall, printedMass } from "./standards.ts";
@@ -2516,6 +2516,7 @@ export async function rebuild(doc: Document): Promise<Geometry> {
   const identity = reusable ? renderIdentity(doc) : undefined;
   const previous = identity && cachedRender(doc.id, identity);
   if (previous) return previous;
+  const renderStarted = performance.now();
   const ctx = await buildModel(doc);
   ctx.dispose();
   const shapes = ctx.shapes;
@@ -2640,7 +2641,7 @@ export async function rebuild(doc: Document): Promise<Geometry> {
       planes: Object.fromEntries(ctx.planeFrames),
     };
     if (Object.keys(ctx.sketchUpdates).length) geometry.sketchUpdates = ctx.sketchUpdates;
-    if (identity) rememberRender(doc, identity, geometry);
+    if (identity) rememberRender(doc, identity, geometry, performance.now() - renderStarted);
     return geometry;
   } finally {
     for (const s of shapes.values()) disposeShape(s);
@@ -2891,7 +2892,7 @@ function linkKey(doc: Document, linked = doc.linked ?? {}, path: string[] = []):
 // One rendered state per document, shared by standalone validation and assembly
 // insertion. Revision alone cannot identify a draft: createWith builds r0 then
 // commits r1, and edits validate changed designs before incrementing revision.
-const instanceGeometry = new Map<string, { identity: string; geometry: Geometry; bytes: number }>();
+const instanceGeometry = new Map<string, { identity: string; geometry: Geometry; bytes: number; buildMs: number }>();
 function renderIdentity(doc: Document): string {
   return JSON.stringify([doc.id, doc.units, doc.sketches, doc.features, doc.bodies,
     doc.referencePlanes, doc.variables, doc.material, doc.massOverride,
@@ -2907,19 +2908,16 @@ function cachedRender(id: string, identity: string): Geometry | undefined {
   instanceGeometry.delete(id); instanceGeometry.set(id, entry);
   return entry.geometry;
 }
-function rememberRender(doc: Document, identity: string, geometry: Geometry) {
+function rememberRender(doc: Document, identity: string, geometry: Geometry, buildMs: number) {
   const bytes = geometry.bodies.reduce((n, b) => n + (b.mesh.vertices.length + b.mesh.normals.length +
     b.mesh.triangles.length + b.edges.lines.length) * 8 + b.topology.length * 512, 0);
   const budget = 64 * 1024 * 1024;
   instanceGeometry.delete(doc.id);
   if (bytes > budget) return;
-  instanceGeometry.set(doc.id, { identity, geometry, bytes });
-  trimActiveCache(instanceGeometry, new Set([doc.id, ...Object.keys(doc.linked ?? {})]), 64);
-  let total = [...instanceGeometry.values()].reduce((n, e) => n + e.bytes, 0);
-  for (const [id, entry] of instanceGeometry) {
-    if (total <= budget) break;
-    total -= entry.bytes; instanceGeometry.delete(id);
-  }
+  instanceGeometry.set(doc.id, { identity, geometry, bytes, buildMs: Math.max(1, buildMs) });
+  const active = new Set([doc.id, ...Object.keys(doc.linked ?? {})]);
+  trimActiveCache(instanceGeometry, active, 64);
+  trimCostedCache(instanceGeometry, active, budget);
 }
 function insertedPart(doc: Document, c: Component): Document {
   const source = c.source && doc.linked?.[c.source.documentId];
@@ -2949,8 +2947,9 @@ async function partGeometry(source: Document) {
   const key = renderIdentity(source);
   let geometry = cachedRender(source.id, key);
   if (!geometry) {
+    const started = performance.now();
     geometry = await rebuild(source);
-    rememberRender(source, key, geometry);
+    rememberRender(source, key, geometry, performance.now() - started);
   }
   return geometry;
 }

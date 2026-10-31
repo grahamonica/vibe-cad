@@ -1,4 +1,4 @@
-import { mkdtemp, rm, readFile, writeFile, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -133,6 +133,7 @@ try {
     nativeEditorMetadataPresent: true,
     survivesInstallationRemoval: true,
   };
+  await mkdir("output", { recursive: true });
   await writeFile(
     "output/package-verification.json",
     JSON.stringify(report, null, 2),

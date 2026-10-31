@@ -143,7 +143,7 @@ export function createMcp(store: Store) {
                           ui: { resourceUri: uiUri },
                         }
                       : {}),
-                    ...(shown && (editorTool || source === 'user') ? deliverView(store, view) : {}),
+                    ...(shown && (editorTool || source === 'user') ? await deliverView(store, view) : {}),
                     ...(download ? { download } : {}),
                   }
                 : undefined,

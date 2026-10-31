@@ -1,10 +1,11 @@
 import type { RenderBody } from "./types.ts";
 
-// Keep CAD topology and solid measurements untouched. Only display buffers use
-// binary transport, avoiding decimal text expansion without rounding geometry.
+// Keep CAD topology and solid measurements untouched. Display buffers use the
+// same float32 precision as the viewport's GPU attributes. Sending float64 here
+// preserved bits the renderer immediately discarded and inflated large views.
 export type WireBody = Omit<RenderBody, "mesh" | "edges"> & {
   mesh: Omit<RenderBody["mesh"], "vertices" | "normals" | "triangles"> & {
-    encoding: "f64-u32-le";
+    encoding: "f32-u32-le" | "f64-u32-le";
     vertices: string | number[];
     normals: string | number[];
     triangles: string | number[];
@@ -17,14 +18,14 @@ export function packDisplayBody(
   base64: (bytes: Uint8Array) => string,
 ): WireBody {
   const pack = (values: number[], integer = false) => {
-    const bytes = new Uint8Array(values.length * (integer ? 4 : 8));
+    const bytes = new Uint8Array(values.length * 4);
     const data = new DataView(bytes.buffer);
     values.forEach((value, i) => {
       if (integer) {
         if (!Number.isInteger(value) || value < 0 || value > 0xffffffff)
           throw Error("Invalid display triangle index");
         data.setUint32(i * 4, value, true);
-      } else data.setFloat64(i * 8, value, true);
+      } else data.setFloat32(i * 4, value, true);
     });
     const encoded = base64(bytes);
     // Simple integer/zero-heavy meshes can be smaller as ordinary JSON.
@@ -34,7 +35,7 @@ export function packDisplayBody(
     ...body,
     mesh: {
       ...body.mesh,
-      encoding: "f64-u32-le",
+      encoding: "f32-u32-le",
       vertices: pack(body.mesh.vertices),
       normals: pack(body.mesh.normals),
       triangles: pack(body.mesh.triangles, true),
@@ -45,18 +46,20 @@ export function packDisplayBody(
 
 export function unpackDisplayBody(body: WireBody | RenderBody): RenderBody {
   if (!("encoding" in body.mesh)) return body as RenderBody;
-  if (body.mesh.encoding !== "f64-u32-le")
+  const encoding = body.mesh.encoding;
+  if (encoding !== "f64-u32-le" && encoding !== "f32-u32-le")
     throw Error("Unknown CAD display buffer encoding");
   const unpack = (value: string | number[], integer = false) => {
     if (Array.isArray(value)) return value;
     if (typeof value !== "string") throw Error("Invalid CAD display buffer");
     const binary = atob(value);
-    const width = integer ? 4 : 8;
+    const width = integer || encoding === "f32-u32-le" ? 4 : 8;
     if (binary.length % width) throw Error("Truncated CAD display buffer");
     const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
     const data = new DataView(bytes.buffer);
     return Array.from({ length: bytes.length / width }, (_, i) =>
-      integer ? data.getUint32(i * width, true) : data.getFloat64(i * width, true),
+      integer ? data.getUint32(i * width, true)
+        : width === 4 ? data.getFloat32(i * width, true) : data.getFloat64(i * width, true),
     );
   };
   const { encoding: _, ...mesh } = body.mesh as WireBody["mesh"];
