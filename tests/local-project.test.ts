@@ -70,3 +70,32 @@ test('a local project reopens parametric parts, imported originals, assembly mat
   assert.deepEqual(new Set(coloredView.geometry.bodies[0].mesh.faceGroups.map(g=>g.color)),colors);
  }finally{await closeKernel();}
 });
+
+test('validated part renders are reused on insert and same-revision drafts invalidate safely',async()=>{
+ const store=new DocumentStore(memory(),rebuild),tools=toolset(store);
+ const part=(await store.create('Reusable plate')).document.id;
+ const edit=async(name:string,args:any)=>{const tool=tools.find(t=>t.name===name)!;return tool.handler(tool.schema.parse({documentId:part,expectedRevision:(await store.read(part)).revision,...args}),'assistant');};
+ const sk=await edit('create_sketch',{plane:'XY'});
+ await edit('add_sketch_entity',{sketchId:sk.document.sketches[0].id,type:'rectangle',values:{x:0,y:0,width:40,height:20}});
+ await edit('extrude',{sketchId:sk.document.sketches[0].id,distance:8});
+ const doc=await store.read(part),initial=await rebuild(doc);
+ const committed=await rebuild({...doc,revision:doc.revision+1});
+ assert.equal(committed,initial,'Committing the already validated design repeated render preparation');
+ const assembly=(await store.create('Reuse assembly')).document;
+ assembly.components=[{id:'plate-instance',name:'Plate',bodyIds:[],source:{documentId:doc.id},grounded:true,position:[100,0,0],rotation:[0,0,0],explode:[0,0,0]}];
+ assembly.linked={[doc.id]:doc};
+ const originalMesh=r.Solid.prototype.mesh;let meshCalls=0;
+ r.Solid.prototype.mesh=function(...args){meshCalls++;return originalMesh.apply(this,args);};
+ let inserted;try{inserted=await rebuild(assembly);}finally{r.Solid.prototype.mesh=originalMesh;}
+ assert.equal(meshCalls,0,'Insertion repeated part meshing');
+ assert.deepEqual(inserted.bodies[0].bounds,[[80,-10,0],[120,10,8]]);
+ const changed=structuredClone(doc);changed.features[0].params.distance=12;
+ assert.ok(Math.abs((await rebuild(changed)).bodies[0].volume-9600)<1e-8,'Same-revision geometry edits used a stale render');
+ const colored=structuredClone(changed);colored.bodies[0].color='#123456';colored.material={name:'Test material',density:2};
+ const updated=await rebuild(colored);
+ assert.equal(updated.bodies[0].color,'#123456');assert.ok(Math.abs(updated.bodies[0].mass!-19.2)<1e-8);
+ const invalid=structuredClone(colored);invalid.features[0].params.sketchId='missing-profile';
+ await assert.rejects(rebuild(invalid));
+ assert.equal(await rebuild(colored),updated,'Failed validation displaced the last valid cache entry');
+ assert.deepEqual((await store.read(part)).features,doc.features,'Draft checks changed the saved part');
+});

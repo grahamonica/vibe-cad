@@ -12,7 +12,7 @@ export class KernelWorkerClient {
   private pending = new Map<number, Pending>();
   private chain: Promise<unknown> = Promise.resolve();
 
-  constructor(private createWorker: () => KernelWorker, private timeoutMs = 120_000) {}
+  constructor(private createWorker: () => KernelWorker, private timeoutMs = 300_000) {}
 
   private getWorker() {
     if (this.worker) return this.worker;
@@ -47,7 +47,7 @@ export class KernelWorkerClient {
         this.pending.delete(id);
         if (this.worker === worker) this.worker = undefined;
         void worker.terminate();
-        reject(Error(`CAD kernel exceeded ${this.timeoutMs / 1000} seconds; retry with a simpler model or a STEP file instead of a dense STL`));
+        reject(Error(`CAD kernel exceeded the ${this.timeoutMs / 1000}-second processing limit; the operation was stopped`));
       }, this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try { worker.postMessage({ id, method, args }); }

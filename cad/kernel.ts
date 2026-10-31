@@ -106,14 +106,14 @@ const clean = (n: number) =>
 
 // ---------------------------------------------------------------------------
 // Topology identity: geometry signatures relative to the body bounds.
-function signature(shape: r.Face | r.Edge, bounds: [Vec3, Vec3]): number[] {
+function signature(shape: r.Face | r.Edge, bounds: [Vec3, Vec3], measured?: { center: Vec3; normal?: Vec3 }): number[] {
   const isFace = shape instanceof r.Face,
-    center = isFace
+    center = measured?.center ?? (isFace
       ? r.measureShapeSurfaceProperties(shape).centerOfMass
-      : edgePoint(shape as r.Edge, 0.5);
-  const direction = isFace
+      : edgePoint(shape as r.Edge, 0.5));
+  const direction = measured?.normal ?? (isFace
     ? faceNormal(shape)
-    : edgeTangent(shape as r.Edge, 0.5);
+    : edgeTangent(shape as r.Edge, 0.5));
   return [
     ...center.map((v, i) =>
       clean((v - bounds[0][i]) / Math.max(bounds[1][i] - bounds[0][i], 1e-6)),
@@ -188,7 +188,15 @@ function topologies(bodyId: string, shape: r.Shape3D): TopologySet {
     ["edge", edgeList],
   ] as const) {
     for (const item of list) {
-      const sig = signature(item, bounds);
+      // Surface integration is expensive on vendor spline faces. Use the same
+      // exact result for identity, selection metadata and area, releasing it now.
+      const properties = kind === "face" ? r.measureShapeSurfaceProperties(item as r.Face) : undefined;
+      let center: Vec3;
+      let area: number | undefined;
+      try { center = properties ? properties.centerOfMass : edgePoint(item as r.Edge, 0.5); area = properties?.area; }
+      finally { properties?.delete(); }
+      let normal = kind === "face" ? faceNormal(item as r.Face) : undefined;
+      const sig = signature(item, bounds, { center, normal });
       const legacyId = `${bodyId}:${kind}:${topologyKey(JSON.stringify([kind, item.geomType, sig]))}`;
       const name = kind === "face" ? faceNames?.get(item.hashCode) : edgeNameMap?.get(item.hashCode);
       const id = name ? `${bodyId}:${kind}:${topologyKey(`name:${name}`)}` : legacyId;
@@ -200,12 +208,6 @@ function topologies(bodyId: string, shape: r.Shape3D): TopologySet {
       if (legacy.has(legacyId)) ambiguous.add(legacyId);
       else legacy.set(legacyId, item);
       hashes.set(item.hashCode, id);
-      let center =
-        kind === "face"
-          ? r.measureShapeSurfaceProperties(item as r.Face).centerOfMass
-          : edgePoint(item as r.Edge, 0.5);
-      let normal =
-        kind === "face" ? faceNormal(item as r.Face) : undefined;
       let radius: number | undefined,
         axis: Topology["axis"];
       if (kind === "edge" && item.geomType === "CIRCLE") {
@@ -270,7 +272,7 @@ function topologies(bodyId: string, shape: r.Shape3D): TopologySet {
         ...(axis ? { axis } : {}),
         label,
         ...(kind === "face"
-          ? { area: r.measureArea(item as r.Face) }
+          ? { area: area! }
           : {
               length: (item as r.Edge).length,
               endpoints: [
@@ -1740,13 +1742,18 @@ function seamEdges(shape: r.Shape3D, topology?: ReturnType<typeof topologies>): 
 function tangentEdgeIds(shape: r.Shape3D, topology: ReturnType<typeof topologies>, hidden: Set<number>): string[] {
   const scope = new NativeScope();
   try {
+    const planarNormals = new Map<number, Vec3>();
+    const metadata = new Map(topology.metadata.map(t => [t.id, t]));
     const faces = new Map<number, r.Face[]>();
-    for (const face of scope.all(shape.faces))
+    for (const face of scope.all(shape.faces)) {
+      const t = metadata.get(topology.hashes.get(face.hashCode) ?? "");
+      if (t?.geomType === "PLANE" && t.normal) planarNormals.set(face.hashCode, t.normal);
       for (const e of scope.all(face.edges)) {
         const list = faces.get(e.hashCode) ?? [];
         if (!list.some((f) => f.isSame(face))) list.push(face);
         faces.set(e.hashCode, list);
       }
+    }
     const out: string[] = [];
     for (const edge of scope.all(shape.edges)) {
       const pair = faces.get(edge.hashCode);
@@ -1755,7 +1762,9 @@ function tangentEdgeIds(shape: r.Shape3D, topology: ReturnType<typeof topologies
         // The edge already has a parametric curve on each adjacent face. A 3D
         // nearest-point projection here is redundant, especially expensive on
         // spline surfaces, and leaves large native temporaries waiting for JS GC.
-        const [n1, n2] = pair.map((face) => boundaryNormal(face, edge));
+        // A plane's oriented normal is constant; its already measured normal
+        // is exact at every boundary. Curved faces still use the edge p-curve.
+        const [n1, n2] = pair.map((face) => planarNormals.get(face.hashCode) ?? boundaryNormal(face, edge));
         const id = topology.hashes.get(edge.hashCode);
         if (id && dot(n1, n2) > Math.cos(Math.PI / 180)) out.push(id);
       } catch {
@@ -2503,6 +2512,10 @@ function inertiaTensor(properties: any, center: Vec3): Tensor {
   return [xx, yy, zz, xy, yz, xz];
 }
 export async function rebuild(doc: Document): Promise<Geometry> {
+  const reusable = !(doc.components?.length);
+  const identity = reusable ? renderIdentity(doc) : undefined;
+  const previous = identity && cachedRender(doc.id, identity);
+  if (previous) return previous;
   const ctx = await buildModel(doc);
   ctx.dispose();
   const shapes = ctx.shapes;
@@ -2527,9 +2540,10 @@ export async function rebuild(doc: Document): Promise<Geometry> {
       if (!body || suppressed.has(id)) continue;
       const topology = topologies(id, shape),
         names = namesOf(shape);
+      const metadata = new Map(topology.metadata.map(t => [t.id, t]));
       for (const face of shape.faces) {
         const tid = topology.hashes.get(face.hashCode),
-          t = tid && topology.metadata.find((x) => x.id === tid),
+          t = tid && metadata.get(tid),
           name = names.get(face.hashCode);
         if (t && name) t.featureId = ownerOf(name);
       }
@@ -2626,6 +2640,7 @@ export async function rebuild(doc: Document): Promise<Geometry> {
       planes: Object.fromEntries(ctx.planeFrames),
     };
     if (Object.keys(ctx.sketchUpdates).length) geometry.sketchUpdates = ctx.sketchUpdates;
+    if (identity) rememberRender(doc, identity, geometry);
     return geometry;
   } finally {
     for (const s of shapes.values()) disposeShape(s);
@@ -2873,7 +2888,39 @@ function linkKey(doc: Document, linked = doc.linked ?? {}, path: string[] = []):
   });
   return `${doc.id}@${doc.revision}(${parts.sort().join(",")})`;
 }
-const instanceGeometry = new Map<string, Geometry>();
+// One rendered state per document, shared by standalone validation and assembly
+// insertion. Revision alone cannot identify a draft: createWith builds r0 then
+// commits r1, and edits validate changed designs before incrementing revision.
+const instanceGeometry = new Map<string, { identity: string; geometry: Geometry; bytes: number }>();
+function renderIdentity(doc: Document): string {
+  return JSON.stringify([doc.id, doc.units, doc.sketches, doc.features, doc.bodies,
+    doc.referencePlanes, doc.variables, doc.material, doc.massOverride,
+    doc.components, doc.mates, doc.componentPatterns,
+    (doc.components ?? []).flatMap(c => {
+      const part = c.source && doc.linked?.[c.source.documentId];
+      return part ? [linkKey(part, doc.linked)] : [];
+    })]);
+}
+function cachedRender(id: string, identity: string): Geometry | undefined {
+  const entry = instanceGeometry.get(id);
+  if (entry?.identity !== identity) return;
+  instanceGeometry.delete(id); instanceGeometry.set(id, entry);
+  return entry.geometry;
+}
+function rememberRender(doc: Document, identity: string, geometry: Geometry) {
+  const bytes = geometry.bodies.reduce((n, b) => n + (b.mesh.vertices.length + b.mesh.normals.length +
+    b.mesh.triangles.length + b.edges.lines.length) * 8 + b.topology.length * 512, 0);
+  const budget = 64 * 1024 * 1024;
+  instanceGeometry.delete(doc.id);
+  if (bytes > budget) return;
+  instanceGeometry.set(doc.id, { identity, geometry, bytes });
+  trimActiveCache(instanceGeometry, new Set([doc.id, ...Object.keys(doc.linked ?? {})]), 64);
+  let total = [...instanceGeometry.values()].reduce((n, e) => n + e.bytes, 0);
+  for (const [id, entry] of instanceGeometry) {
+    if (total <= budget) break;
+    total -= entry.bytes; instanceGeometry.delete(id);
+  }
+}
 function insertedPart(doc: Document, c: Component): Document {
   const source = c.source && doc.linked?.[c.source.documentId];
   if (!source) throw Error(`The part inserted as ${c.name} is unavailable`);
@@ -2899,16 +2946,11 @@ function displayed(c: Component | undefined, body: Shown): Shown {
 const suppressedBodies = (doc: Document) => new Set((doc.components ?? []).filter((c) => c.suppressed).flatMap((c) => c.bodyIds));
 /** An inserted part's own geometry, rebuilt once per revision. */
 async function partGeometry(source: Document) {
-  const key = linkKey(source);
-  let geometry = instanceGeometry.get(key);
+  const key = renderIdentity(source);
+  let geometry = cachedRender(source.id, key);
   if (!geometry) {
     geometry = await rebuild(source);
-    instanceGeometry.set(key, geometry);
-    const active = new Set([key, ...Object.values(source.linked ?? {}).map(d => linkKey(d, source.linked))]);
-    trimActiveCache(instanceGeometry, active, 32);
-  } else {
-    instanceGeometry.delete(key);
-    instanceGeometry.set(key, geometry);
+    rememberRender(source, key, geometry);
   }
   return geometry;
 }

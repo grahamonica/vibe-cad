@@ -1,5 +1,13 @@
 # Vibe CAD 1.1
 
+## 1.1.10 reuse validated part rendering on insertion
+
+Inserting a newly imported part repeated its expensive mesh and selectable-topology preparation even though import had already validated it. Standalone part validation and inserted instances now share the rendered result. The cache compares actual design state and committed dependency identities, keeps one state per document, and has an estimated 64 MiB budget. A revision increment alone preserves unchanged geometry; same-revision draft edits invalidate it. Failed edits retain the last valid cache entry. Surface integration is reused for identity, centroid and area, metadata lookup is indexed, and planar tangent boundaries reuse exact constant normals. Curved-face classification and native topology identities remain intact.
+
+A practical replay of the actual 19 MB Pi vendor STEP preserved its 3484.138991 mm3 volume and 15,956 selectable faces/edges. Cold preparation remained expensive (90–116 seconds across runs); reusing that result took 2 ms, and inserting it into a small assembly took 957 ms. These are local measurements, not a claim that every large assembly opens in a second. Cold operations have a bounded 300-second deadline instead of the previous 120-second cutoff; Stop still interrupts the worker. The timeout now reports a processing limit rather than recommending STEP for an existing STEP file. No additional retries, background benchmarks or dependencies were added.
+
+Focused checks cover reuse, same-revision geometry/appearance/material invalidation, failed-draft rejection, unchanged saved designs, STEP editing and stable face names. The previous editor resource remains available for restored panels. Verify the full Yosemite assembly in the native host after activating the update.
+
 ## 1.1.9 bounded file import transport
 
 The import schema allowed 40 MiB of base64, but the stdio SDK default closed the connection above 10 MiB. The transport now uses one explicit 48 MiB budget with complete-line framing. Oversized requests return an error, including when the client places its request ID after the large payload, and the next request still works. Small requests do not reserve a 48 MiB buffer. No retries, worker cycling or new dependencies were added.
