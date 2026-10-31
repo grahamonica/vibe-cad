@@ -539,13 +539,13 @@ export interface RenderBody {
   /** Edges where two faces meet smoothly (topology ids), hidden when tangent edges are turned off. */
   tangentEdges?: string[];
   mesh: {
-    vertices: number[];
-    normals: number[];
-    triangles: number[];
+    vertices: number[] | Float32Array;
+    normals: number[] | Float32Array;
+    triangles: number[] | Uint32Array;
     faceGroups: { start: number; count: number; faceId: number; id: string; color?: string }[];
   };
   edges: {
-    lines: number[];
+    lines: number[] | Float32Array;
     edgeGroups: { start: number; count: number; edgeId: number; id: string }[];
   };
   topology: Topology[];

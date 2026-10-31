@@ -66,7 +66,12 @@ test("stream displays the first complete part before remaining bytes arrive, pre
     await firstPart;
     assert.deepEqual(progress, [0, 1]);
     zip.end(body(1) + done);
-    assert.deepEqual(await result, view);
+    const received=await result;
+    assert.deepEqual(received,{...view,geometry:{...view.geometry,bodies:view.geometry.bodies.map(b=>({
+      ...b,mesh:{...b.mesh,vertices:Float32Array.from(b.mesh.vertices),normals:Float32Array.from(b.mesh.normals),triangles:Uint32Array.from(b.mesh.triangles)},
+      edges:{...b.edges,lines:Float32Array.from(b.edges.lines)},
+    }))}});
+    assert.equal(view.geometry.bodies[0].mesh.vertices[3],1.234567891,'Display conversion changed the source CAD data');
     assert.deepEqual(progress, [0, 1, 2]);
   } finally {
     clearTimeout(timeout);

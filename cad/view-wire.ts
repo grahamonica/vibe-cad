@@ -26,7 +26,7 @@ export function packDisplayBody(
   body: RenderBody,
   base64: (bytes: Uint8Array) => string,
 ): WireBody {
-  const pack = (values: number[], integer = false) => {
+  const pack = (values: number[] | Float32Array | Uint32Array, integer = false) => {
     const encodedLength = 4 * Math.ceil(values.length * 4 / 3);
     let jsonLength = values.length ? values.length + 1 : 2;
     for (const value of values) {
@@ -37,7 +37,7 @@ export function packDisplayBody(
     }
     // Measure numeric text without allocating a whole decimal JSON array. This
     // preserves the smaller representation for zero-heavy normals/box meshes.
-    if (jsonLength <= encodedLength) return values;
+    if (jsonLength <= encodedLength) return Array.isArray(values) ? values : Array.from(values);
     const bytes = new Uint8Array(values.length * 4);
     const data = new DataView(bytes.buffer);
     values.forEach((value, i) => {
@@ -64,20 +64,23 @@ export function unpackDisplayBody(body: WireBody | RenderBody): RenderBody {
   const encoding = body.mesh.encoding;
   if (encoding !== "f64-u32-le" && encoding !== "f32-u32-le")
     throw Error("Unknown CAD display buffer encoding");
-  const unpack = (value: string | number[], integer = false) => {
-    if (Array.isArray(value)) return value;
+  function unpack(value: string | number[], integer: true): Uint32Array;
+  function unpack(value: string | number[], integer?: false): Float32Array;
+  function unpack(value: string | number[], integer = false): Float32Array | Uint32Array {
+    if (Array.isArray(value)) return integer ? Uint32Array.from(value) : Float32Array.from(value);
     if (typeof value !== "string") throw Error("Invalid CAD display buffer");
     const binary = atob(value);
     const width = integer || encoding === "f32-u32-le" ? 4 : 8;
     if (binary.length % width) throw Error("Truncated CAD display buffer");
     const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
     const data = new DataView(bytes.buffer);
-    return Array.from({ length: bytes.length / width }, (_, i) =>
-      integer ? data.getUint32(i * width, true)
-        : width === 4 ? data.getFloat32(i * width, true) : data.getFloat64(i * width, true),
-    );
-  };
+    const result = integer ? new Uint32Array(bytes.length / width) : new Float32Array(bytes.length / width);
+    for (let i = 0; i < result.length; i++) result[i] = integer ? data.getUint32(i * width, true)
+      : width === 4 ? data.getFloat32(i * width, true) : data.getFloat64(i * width, true);
+    return result;
+  }
   const { encoding: _, ...mesh } = body.mesh as WireBody["mesh"];
+  const edges = (body as WireBody).edges;
   return {
     ...body,
     mesh: {
@@ -86,6 +89,6 @@ export function unpackDisplayBody(body: WireBody | RenderBody): RenderBody {
       normals: unpack(mesh.normals),
       triangles: unpack(mesh.triangles, true),
     },
-    edges: { ...body.edges, lines: unpack(body.edges.lines) },
+    edges: { ...edges, lines: unpack(edges.lines) },
   };
 }

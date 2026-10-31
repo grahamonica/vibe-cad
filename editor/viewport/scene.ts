@@ -23,6 +23,7 @@ import { textureInfo } from "../../cad/appearance.ts";
 import { textureCanvases } from "./textures.ts";
 import { prepareDrag } from '../../cad/drag-motion.ts';
 import { assertRenderBudget, renderPixelRatio } from './render-budget.ts';
+import { meshGeometry, boxMapped, outlineCandidates } from './render-buffers.ts';
 import { prepareMotion,type MotionPreview } from '../../cad/motion-preview.ts';
 import {samePlacement} from '../../cad/placement.ts';
 import type {Placement} from '../../cad/types.ts';
@@ -92,8 +93,8 @@ interface BodyRecord {
   segmentEdge: string[];
   offset: THREE.Vector3;
   style: DisplayStyle;
-  /** Silhouette candidates on curved faces: per mesh edge its two points and both triangle normals. */
-  outline?: { candidates: Float32Array; lines: LineSegments2 };
+  /** Silhouette endpoints reference the existing mesh; buffers are reused on orbit. */
+  outline?: { vertices: Uint32Array; normals: Float32Array; visible: Uint8Array; positions: Float32Array; lines: LineSegments2 };
   /** Hidden Lines Visible: the edges behind faces, dashed. */
   hiddenLines?: LineSegments2;
   /** Shaded (no edges): the selected or hovered edges only. */
@@ -131,6 +132,7 @@ export class CadScene {
   readonly sectionGroup = new THREE.Group();
   private section: THREE.Plane | null = null;
   private bodies = new Map<string, BodyRecord>();
+  private renderBodies: RenderBody[] = [];
   private environmentTarget?: THREE.WebGLRenderTarget;
   private lineMaterials = new Set<LineMaterial>();
   /** Dashed hidden lines: dashes are kept a fixed number of pixels long. */
@@ -331,6 +333,7 @@ export class CadScene {
     target.updateMatrixWorld(true);this.invalidate();
   }
   private displayPlacements(placements:NonNullable<Geometry['placements']>){
+    const moved:BodyRecord[]=[];
     for(const [id,r]of this.bodies){
       const before=this.currentView?.geometry.placements?.[id],after=placements[id];if(!before||!after)continue;
       if(samePlacement(this.displayedPlacements.get(id)??before,after))continue;
@@ -338,6 +341,7 @@ export class CadScene {
       const mat=(p:typeof before)=>new THREE.Matrix4().compose(new THREE.Vector3(...p.position),new THREE.Quaternion(...p.quaternion),new THREE.Vector3(1,1,1));
       const delta=mat(after).multiply(mat(before).invert());
       for(const o of recordObjects(r)) {const original=this.dragMatrices.get(o);if(!original)continue;o.matrixAutoUpdate=false;o.matrix.copy(delta).multiply(original);o.updateMatrixWorld(true);}
+      moved.push(r);
     }
     if(this.section){
       const bounds=new THREE.Box3();for(const r of this.bodies.values())if(!r.mesh.userData.pickOnly){r.mesh.geometry.computeBoundingBox();bounds.union(r.mesh.geometry.boundingBox!.clone().applyMatrix4(r.mesh.matrixWorld));}
@@ -346,6 +350,7 @@ export class CadScene {
         child.position.copy(bounds.getCenter(new THREE.Vector3()).projectOnPlane(normal).addScaledVector(normal,this.section.constant));child.scale.setScalar(span/child.userData.span);
       }
     }
+    this.updateOutlines(true,moved);
     this.invalidate();
   }
   beginMotion(spec:MotionPreview|null){
@@ -788,7 +793,9 @@ export class CadScene {
   }
   setGeometry(view: View | null, options: SceneOptions = {}) {
     const visible = view?.geometry.bodies.filter(b => !b.hidden && !options.hiddenBodies?.has(b.id)) ?? [];
-    assertRenderBudget([...visible, ...(options.ghost?.bodies ?? [])]);
+    const renderBodies = [...visible, ...(options.ghost?.bodies ?? [])];
+    assertRenderBudget(renderBodies);
+    this.renderBodies = renderBodies;
     const wrapper = this.transform.object;
     this.transform.detach();wrapper?.removeFromParent();this.resetDrag();this.currentView=view??undefined;
     this.clearGroup(this.explodeGroup);
@@ -843,21 +850,26 @@ export class CadScene {
           }
         } else {
           const [mat] = this.faceMaterials(palette.accent, 0.4);
-          const mesh = new THREE.Mesh(this.meshGeometry(body), mat);
+          const mesh = new THREE.Mesh(meshGeometry(body), mat);
           mesh.renderOrder = 5;
           this.ghostGroup.add(mesh);
         }
       }
     this.applyHighlight();
     if (this.section) this.applySection();
+    this.checkRenderBudget();
     this.invalidate();
   }
-  private meshGeometry(body: RenderBody) {
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(body.mesh.vertices, 3));
-    geo.setAttribute("normal", new THREE.Float32BufferAttribute(body.mesh.normals, 3));
-    geo.setIndex(body.mesh.triangles);
-    return geo;
+  private checkRenderBudget() {
+    const geometries = new Set<THREE.BufferGeometry>();
+    const buffers: ArrayBufferView[] = [];
+    for (const r of this.bodies.values()) {
+      for (const object of recordObjects(r)) geometries.add(object.geometry);
+      buffers.push(r.segments,r.edgeColors);
+      if(r.outline) buffers.push(r.outline.vertices,r.outline.normals,r.outline.visible,r.outline.positions);
+    }
+    this.ghostGroup.traverse(object=>{if(object instanceof THREE.Mesh)geometries.add(object.geometry);});
+    assertRenderBudget(this.renderBodies,{geometries,buffers});
   }
   private buildBody(
     body: RenderBody,
@@ -865,9 +877,9 @@ export class CadScene {
   ): BodyRecord {
     const style = body.style ?? o.style ?? "shaded-edges",
       texture = style === "shaded" || style === "shaded-edges" ? body.texture : undefined;
-    let geo = this.meshGeometry(body);
+    let geo = meshGeometry(body);
     for (const g of body.mesh.faceGroups) geo.addGroup(g.start, g.count, 0);
-    if (texture) geo = this.boxMapped(geo, body, textureInfo(texture).tile);
+    if (texture) geo = boxMapped(geo, body, textureInfo(texture).tile);
     const color = body.color?.toLowerCase() === "#86a7a0" ? palette.body : (body.color || palette.body);
     const mats = this.faceMaterials(color, o.opacity, style, texture);
     if (o.previewTint && "emissive" in mats[0]) (mats[0] as THREE.MeshStandardMaterial).emissive = new THREE.Color(palette.accent).multiplyScalar(0.12);
@@ -889,18 +901,24 @@ export class CadScene {
       segmentEdge: string[] = [],
       ranges = new Map<string, { start: number; count: number }>();
     const tangent = o.hideTangent ? new Set(body.tangentEdges ?? []) : undefined;
+    let cursor = 0;
+    const complete = body.edges.edgeGroups.every(g=>{
+      if(g.start!==cursor || g.count%2)return false;
+      cursor+=g.count;return true;
+    }) && cursor*3===lines.length;
+    const reusable = complete && !tangent && !body.threads?.length && lines instanceof Float32Array;
     for (const g of body.edges.edgeGroups) {
       if (tangent?.has(g.id)) continue;
-      const start = segments.length / 6;
-      for (let i = g.start; i + 1 < g.start + g.count; i += 2)
+      const start = reusable ? g.start/2 : segments.length / 6;
+      if(!reusable)for (let i = g.start; i + 1 < g.start + g.count; i += 2)
         segments.push(lines[i * 3], lines[i * 3 + 1], lines[i * 3 + 2], lines[i * 3 + 3], lines[i * 3 + 4], lines[i * 3 + 5]);
-      const count = segments.length / 6 - start;
+      const count = reusable ? g.count/2 : segments.length / 6 - start;
       ranges.set(g.id, { start, count });
       for (let k = 0; k < count; k++) segmentEdge.push(g.id);
     }
     // Cosmetic threads: light rings at the pitch along the threaded length
     // (at most 60), drawn after the edges so they are never picked as edges.
-    const edgeCount = segments.length;
+    const edgeCount = reusable ? lines.length : segments.length;
     for (const t of body.threads ?? []) {
       const n = new THREE.Vector3(...t.direction).normalize(),
         u = new THREE.Vector3(Math.abs(n.x) < 0.9 ? 1 : 0, Math.abs(n.x) < 0.9 ? 0 : 1, 0).cross(n).normalize(),
@@ -917,7 +935,7 @@ export class CadScene {
       }
     }
     const edgeGeo = new LineSegmentsGeometry();
-    const positions = new Float32Array(segments);
+    const positions = reusable ? body.edges.lines as Float32Array : new Float32Array(segments);
     edgeGeo.setPositions(positions.length ? positions : new Float32Array(6));
     const colors = new Float32Array(Math.max(positions.length, 6));
     const ink = new THREE.Color(palette.ink),
@@ -949,12 +967,16 @@ export class CadScene {
       hiddenLines.computeLineDistances();
       hiddenLines.position.copy(offset);
     }
-    const outline = o.opacity === 1 && style !== "shaded" ? this.outlineCandidates(body) : undefined;
+    const outline = o.opacity === 1 && style !== "shaded" ? outlineCandidates(body) : undefined;
     let outlineLines: LineSegments2 | undefined;
-    if (outline?.length) {
+    let outlinePositions: Float32Array | undefined;
+    if (outline?.vertices.length) {
       const g = new LineSegmentsGeometry();
-      g.setPositions(new Float32Array(6));
+      outlinePositions = new Float32Array(Math.min(1024,outline.vertices.length/2)*6);
+      g.setPositions(outlinePositions);
+      g.instanceCount = 0;
       outlineLines = new LineSegments2(g, this.lineMaterial(palette.ink, 1.25));
+      outlineLines.frustumCulled = false;
       outlineLines.position.copy(offset);
       outlineLines.userData = { bodyId: body.id, outline: true };
     }
@@ -968,112 +990,47 @@ export class CadScene {
       segmentEdge,
       offset,
       style,
-      ...(outline?.length && outlineLines ? { outline: { candidates: outline, lines: outlineLines } } : {}),
+      ...(outline?.vertices.length && outlineLines && outlinePositions ? { outline: { ...outline, visible:new Uint8Array(outline.vertices.length/2), positions:outlinePositions, lines: outlineLines } } : {}),
       ...(hiddenLines ? { hiddenLines } : {}),
       ...(highlight ? { highlight } : {}),
     };
   }
-  /**
-   * Texture coordinates by box mapping: each triangle takes the plane its
-   * normal points along most, in millimeters from the body's corner, so the
-   * pattern keeps its size and follows the body when it moves.
-   */
-  private boxMapped(indexed: THREE.BufferGeometry, body: RenderBody, tile: number) {
-    const geo = indexed.toNonIndexed();
-    indexed.dispose();
-    const p = geo.getAttribute("position"),
-      uv = new Float32Array(p.count * 2),
-      [x0, y0, z0] = body.bounds[0];
-    const a = new THREE.Vector3(),
-      b = new THREE.Vector3(),
-      c = new THREE.Vector3();
-    for (let i = 0; i < p.count; i += 3) {
-      a.fromBufferAttribute(p, i);
-      b.fromBufferAttribute(p, i + 1);
-      c.fromBufferAttribute(p, i + 2);
-      const n = b.sub(a).cross(c.sub(a));
-      const ax = Math.abs(n.x),
-        ay = Math.abs(n.y),
-        az = Math.abs(n.z);
-      for (let k = i; k < i + 3; k++) {
-        const x = p.getX(k) - x0,
-          y = p.getY(k) - y0,
-          z = p.getZ(k) - z0;
-        const [u, v] = az >= ax && az >= ay ? [x, y] : ay >= ax ? [x, z] : [y, z];
-        uv[k * 2] = u / tile;
-        uv[k * 2 + 1] = v / tile;
-      }
-    }
-    geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
-    return geo;
-  }
-  /**
-   * Mesh edges inside curved faces where the surface could turn away from the
-   * viewer: each with its endpoints and the normals of its two triangles.
-   * Vertices are welded by position, so seams of closed surfaces join up.
-   */
-  private outlineCandidates(body: RenderBody): Float32Array {
-    const curved = new Set(body.topology.filter((t) => t.kind === "face" && t.geomType !== "PLANE").map((t) => t.id));
-    const v = body.mesh.vertices,
-      tri = body.mesh.triangles,
-      out: number[] = [];
-    const key = (i: number) => `${Math.round(v[i * 3] * 1e5)},${Math.round(v[i * 3 + 1] * 1e5)},${Math.round(v[i * 3 + 2] * 1e5)}`;
-    for (const g of body.mesh.faceGroups) {
-      if (!curved.has(g.id)) continue;
-      const weld = new Map<string, number>(),
-        id = (i: number) => {
-          const k = key(i);
-          if (!weld.has(k)) weld.set(k, i);
-          return weld.get(k)!;
-        };
-      const normal = (t: number) => {
-        const [a, b, c] = [tri[t], tri[t + 1], tri[t + 2]].map((i) => new THREE.Vector3(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]));
-        return b.sub(a).cross(c.sub(a)).normalize();
-      };
-      const shared = new Map<string, { a: number; b: number; tris: number[] }>();
-      for (let t = g.start; t < g.start + g.count; t += 3)
-        for (const [p, q] of [
-          [tri[t], tri[t + 1]],
-          [tri[t + 1], tri[t + 2]],
-          [tri[t + 2], tri[t]],
-        ]) {
-          const a = id(p),
-            b = id(q),
-            k = a < b ? `${a}|${b}` : `${b}|${a}`;
-          const e = shared.get(k) ?? { a: p, b: q, tris: [] };
-          e.tris.push(t);
-          shared.set(k, e);
-        }
-      for (const e of shared.values()) {
-        if (e.tris.length !== 2) continue;
-        const n1 = normal(e.tris[0]),
-          n2 = normal(e.tris[1]);
-        if (n1.dot(n2) > 0.99999) continue;
-        out.push(v[e.a * 3], v[e.a * 3 + 1], v[e.a * 3 + 2], v[e.b * 3], v[e.b * 3 + 1], v[e.b * 3 + 2], n1.x, n1.y, n1.z, n2.x, n2.y, n2.z);
-      }
-    }
-    return new Float32Array(out);
-  }
   private outlineView = new THREE.Vector3();
   /** Redraw silhouettes when the view direction changes: edges between front- and back-facing triangles. */
-  private updateOutlines(force = false) {
+  private updateOutlines(force = false, subset?: Iterable<BodyRecord>) {
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
-    if (!force && dir.distanceToSquared(this.outlineView) < 1e-10) return;
-    this.outlineView.copy(dir);
-    for (const r of this.bodies.values()) {
+    if (!subset && !force && dir.distanceToSquared(this.outlineView) < 1e-10) return;
+    if(!subset)this.outlineView.copy(dir);
+    let grew = false;
+    for (const r of subset ?? this.bodies.values()) {
       if (!r.outline) continue;
-      const c = r.outline.candidates,
-        seg: number[] = [];
-      for (let i = 0; i < c.length; i += 12) {
-        const f1 = c[i + 6] * dir.x + c[i + 7] * dir.y + c[i + 8] * dir.z,
-          f2 = c[i + 9] * dir.x + c[i + 10] * dir.y + c[i + 11] * dir.z;
-        if (f1 * f2 < 0) seg.push(c[i], c[i + 1], c[i + 2], c[i + 3], c[i + 4], c[i + 5]);
+      const o = r.outline, c = o.normals;
+      const localDir=dir.clone().transformDirection(r.mesh.matrixWorld.clone().invert());
+      let count = 0;
+      for(let k=0,i=0;i<c.length;k++,i+=6){
+        const f1=c[i]*localDir.x+c[i+1]*localDir.y+c[i+2]*localDir.z,
+          f2=c[i+3]*localDir.x+c[i+4]*localDir.y+c[i+5]*localDir.z;
+        o.visible[k]=f1*f2<0?1:0; count+=o.visible[k];
       }
-      const g = r.outline.lines.geometry as LineSegmentsGeometry;
-      g.setPositions(new Float32Array(seg.length ? seg : [0, 0, 0, 0, 0, 0]));
-      r.outline.lines.visible = seg.length > 0 && r.edges.visible;
+      let g = o.lines.geometry as LineSegmentsGeometry;
+      if(count*6>o.positions.length){
+        const capacity=Math.min(o.visible.length,2**Math.ceil(Math.log2(count)));
+        o.positions=new Float32Array(capacity*6);
+        g.dispose(); g=new LineSegmentsGeometry();g.setPositions(o.positions);o.lines.geometry=g;
+        grew=true;
+      }
+      const v=r.body.mesh.vertices;
+      let offset=0;
+      for(let k=0;k<o.visible.length;k++)if(o.visible[k])for(let e=0;e<2;e++){
+        const index=o.vertices[k*2+e]*3;
+        o.positions[offset++]=v[index];o.positions[offset++]=v[index+1];o.positions[offset++]=v[index+2];
+      }
+      (g.attributes.instanceStart as THREE.InterleavedBufferAttribute).data.needsUpdate=true;
+      g.instanceCount=count;
+      o.lines.visible=count>0&&r.edges.visible;
     }
+    if(grew)this.checkRenderBudget();
   }
   /** Attach the translate gizmo to a body's displayed position (assembly component moves). */
   attachGizmo(componentId: string, bodyIds: string[], position: Vec3, mode: 'translate' | 'rotate' = 'translate', axis?: Vec3) {
@@ -1303,6 +1260,7 @@ export class CadScene {
     this.clearGroup(this.explodeGroup);
     this.clearGroup(this.helperGroup);
     this.bodies.clear();
+    this.renderBodies=[];
     this.currentView=undefined;
     this.dragMatrices.clear();this.displayedPlacements.clear();this.dragMotion=undefined;this.motionPreview=undefined;this.directDrag=undefined;this.wakeFrame=undefined;
     this.onInteraction?.(false);this.onInteraction=undefined;this.onComponentDrag=undefined;

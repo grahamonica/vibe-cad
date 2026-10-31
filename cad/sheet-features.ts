@@ -20,7 +20,7 @@ export interface SheetFeatureReport {
   findings: SheetFeature[];
   notes: string[];
 }
-const dot = (a: number[], b: number[]) => a.reduce((s, v, i) => s + v * b[i], 0);
+const dot = (a: ArrayLike<number>, b: ArrayLike<number>) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
 const cross = (a: number[], b: number[]): Vec3 => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
 const unit = (a: number[]) => a.map(v => v / Math.hypot(...a)) as Vec3;
 const cross2 = (a: Vec2, b: Vec2) => a[0]*b[1]-a[1]*b[0];

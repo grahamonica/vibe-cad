@@ -15,7 +15,7 @@ function plate(loops:Vec2[][]):RenderBody {
   loops.forEach((loop,k)=>loop.forEach((a,i)=>{
     const b=loop[(i+1)%loop.length],id=`loop${k}-edge${i}`,ends:[Vec3,Vec3]=[[...a,t],[...b,t]];
     body.edges.edgeGroups.push({id,edgeId:body.edges.edgeGroups.length,start:body.edges.lines.length/3,count:2});
-    body.edges.lines.push(...ends[0],...ends[1]);body.topology.push({id,bodyId:body.id,kind:'edge',geomType:'LINE',center:[(a[0]+b[0])/2,(a[1]+b[1])/2,t],signature:[],label:id,endpoints:ends});
+    body.edges.lines=[...body.edges.lines,...ends[0],...ends[1]];body.topology.push({id,bodyId:body.id,kind:'edge',geomType:'LINE',center:[(a[0]+b[0])/2,(a[1]+b[1])/2,t],signature:[],label:id,endpoints:ends});
   }));return body;
 }
 test('sheet screening distinguishes narrow material webs from cut gaps and excludes ordinary tips',()=>{

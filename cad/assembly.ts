@@ -751,7 +751,7 @@ export function placeGeometry(doc: Document, geometry: Geometry): Geometry {
   if (doc.components?.length) geometry.componentStatus = report.components;
   for (const b of geometry.bodies) {
     const p = placements[b.id];
-    const transform = (numbers: number[], normal = false) => {
+    const transform = (numbers: number[] | Float32Array, normal = false) => {
       for (let i = 0; i < numbers.length; i += 3) {
         const a: Vec3 = [numbers[i], numbers[i + 1], numbers[i + 2]];
         const transformed = normal ? direction(a, p) : point(a, p);

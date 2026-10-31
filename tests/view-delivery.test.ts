@@ -53,16 +53,18 @@ test("large editor views stay below MCP message limits and retain an exact revis
     assert.equal(packed.mesh.encoding,'f32-u32-le');
     assert.equal(typeof packed.mesh.vertices,'string');
     const decoded = unpackDisplayBody(packed);
-    assert.deepEqual(decoded.mesh.vertices.map(Math.fround),precise.mesh.vertices.map(Math.fround));
-    assert.deepEqual(decoded.edges.lines.map(Math.fround),precise.edges.lines.map(Math.fround));
+    assert.ok(decoded.mesh.vertices instanceof Float32Array);
+    assert.ok(decoded.mesh.triangles instanceof Uint32Array);
+    assert.deepEqual(Array.from(decoded.mesh.vertices),Array.from(precise.mesh.vertices,Math.fround));
+    assert.deepEqual(Array.from(decoded.edges.lines),Array.from(precise.edges.lines,Math.fround));
     assert.deepEqual(decoded.topology,precise.topology);
     assert.equal(decoded.volume,precise.volume);
     assert.equal(precise.mesh.vertices[0],0.123456789012345);
     const oldBytes=Buffer.alloc(precise.mesh.vertices.length*8);
     precise.mesh.vertices.forEach((v,i)=>oldBytes.writeDoubleLE(v,i*8));
-    assert.deepEqual(unpackDisplayBody({...packed,edges:precise.edges,mesh:{...packed.mesh,
-      normals:precise.mesh.normals,triangles:precise.mesh.triangles,
-      encoding:'f64-u32-le',vertices:oldBytes.toString('base64')}}).mesh.vertices,precise.mesh.vertices);
+    assert.deepEqual(Array.from(unpackDisplayBody({...packed,edges:{...precise.edges,lines:Array.from(precise.edges.lines)},mesh:{...packed.mesh,
+      normals:Array.from(precise.mesh.normals),triangles:Array.from(precise.mesh.triangles),
+      encoding:'f64-u32-le',vertices:oldBytes.toString('base64')}}).mesh.vertices),Array.from(precise.mesh.vertices,Math.fround));
     // Noisy unused vertices exercise multiple chunks without changing
     // solid geometry, topology references or the existing triangle indices.
     view.geometry.bodies[0].mesh.vertices = Array.from(
@@ -91,8 +93,13 @@ test("large editor views stay below MCP message limits and retain an exact revis
     }), () => {});
     assert.equal(restored.document.revision, 3);
     assert.equal(restored.geometry.bodies[0].mesh.vertices.length, 400_002);
-    assert.deepEqual(restored.geometry.bodies[0].mesh, transferMesh);
-    assert.deepEqual(restored.geometry.bodies[0].edges, transferEdges);
+    const received = restored.geometry.bodies[0];
+    for(const key of ['vertices','normals'] as const)
+      assert.deepEqual(Array.from(received.mesh[key]),Array.from(transferMesh[key],Math.fround));
+    assert.deepEqual(Array.from(received.mesh.triangles),Array.from(transferMesh.triangles));
+    assert.deepEqual(Array.from(received.edges.lines),Array.from(transferEdges.lines,Math.fround));
+    assert.deepEqual(received.mesh.faceGroups,transferMesh.faceGroups);
+    assert.deepEqual(received.edges.edgeGroups,transferEdges.edgeGroups);
     assert.deepEqual(
       restored.geometry.bodies[0].topology,
       JSON.parse(JSON.stringify(view.geometry.bodies[0].topology)),

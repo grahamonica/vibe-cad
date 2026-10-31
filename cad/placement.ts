@@ -15,8 +15,8 @@ export function placeCachedBody(body:RenderBody,before:Placement=identity,after:
   const shift=new Vector3(...after.position).sub(new Vector3(...before.position).applyQuaternion(rotation));
   const turn=(p:Vec3)=>new Vector3(...p).applyQuaternion(rotation).toArray() as Vec3;
   const point=(p:Vec3)=>new Vector3(...p).applyQuaternion(rotation).add(shift).toArray() as Vec3;
-  const transform=(values:number[],normal=false)=>{
-    const out=new Array<number>(values.length),fn=normal?turn:point;
+  const transform=(values:number[] | Float32Array,normal=false)=>{
+    const out=values instanceof Float32Array ? new Float32Array(values.length) : new Array<number>(values.length),fn=normal?turn:point;
     for(let i=0;i<values.length;i+=3){const p=fn([values[i],values[i+1],values[i+2]]);out[i]=p[0];out[i+1]=p[1];out[i+2]=p[2];}return out;
   };
   const vertices=transform(body.mesh.vertices),bounds:[Vec3,Vec3]=[[Infinity,Infinity,Infinity],[-Infinity,-Infinity,-Infinity]];

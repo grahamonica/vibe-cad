@@ -1,5 +1,11 @@
 # Vibe CAD 1.1
 
+## 1.1.13 shared display buffers
+
+Native activation exposed a separate viewport allocation failure after delivery succeeded. Display decoding now retains float32/uint32 buffers and shares them with GPU attributes. Metal textures preserve indexed triangles, splitting vertices only at projection seams. Curved silhouettes reference mesh endpoints and reuse their camera-update buffers. Memory checks count shared CPU backing stores and actual upload attributes under the unchanged 128 MiB limit. CAD solids, topology and export precision remain unchanged.
+
+The actual 86-body assembly prepares about 93 MiB of geometry buffers at three camera angles, retaining every triangle position, normal and face group. Ten focused existing checks pass. This is preparation/allocation evidence; native rendering and live motion still require verification after activation.
+
 ## 1.1.12 execution and resource ownership audit
 
 Completed command queues no longer retain model results beyond cache limits. Saved edits return their validated snapshot without post-commit rebuilding; viewport-delivery failures report separately from operation failure. Stream errors propagate without terminating stdio, producer/consumer budgets share one contract, and large buffers avoid temporary decimal copies. Native faults are reported without automatic replay; cancellation clears queued requests. One editor connection state stops polling a closed transport while allowing local teardown. Remaining sampling paths release native resources explicitly, and versioned editor links use one resource template.
