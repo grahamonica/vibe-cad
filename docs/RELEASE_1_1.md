@@ -1,5 +1,15 @@
 # Vibe CAD 1.1
 
+## 1.1.12 execution and resource ownership audit
+
+Completed command queues no longer retain model results beyond cache limits. Saved edits return their validated snapshot without post-commit rebuilding; viewport-delivery failures report separately from operation failure. Stream errors propagate without terminating stdio, producer/consumer budgets share one contract, and large buffers avoid temporary decimal copies. Native faults are reported without automatic replay; cancellation clears queued requests. One editor connection state stops polling a closed transport while allowing local teardown. Remaining sampling paths release native resources explicitly, and versioned editor links use one resource template.
+
+See [the reliability audit](RELIABILITY.md) for causes, invariants, focused checks and the actual assembly sequence. Native embedded-editor verification remains required after activation.
+
+## 1.1.11 large assembly cache and view delivery
+
+Cost-aware render eviction prevents sequential assembly traversal from repeatedly discarding its expensive parts within the existing cache budget. Display buffers use GPU precision, and delivery retains compressed bytes rather than expanded base64 strings.
+
 ## 1.1.10 reuse validated part rendering on insertion
 
 Inserting a newly imported part repeated its expensive mesh and selectable-topology preparation even though import had already validated it. Standalone part validation and inserted instances now share the rendered result. The cache compares actual design state and committed dependency identities, keeps one state per document, and has an estimated 64 MiB budget. A revision increment alone preserves unchanged geometry; same-revision draft edits invalidate it. Failed edits retain the last valid cache entry. Surface integration is reused for identity, centroid and area, metadata lookup is indexed, and planar tangent boundaries reuse exact constant normals. Curved-face classification and native topology identities remain intact.

@@ -181,6 +181,9 @@ test("MCP handshake, typed tools, annotations, self-contained UI resource, mutat
     const resources = await client.listResources();
     assert.ok(resources.resources.some((r) => r.uri === uiUri));
     const ui = await client.readResource({ uri: uiUri });
+    const previousEditor = await client.readResource({uri:"ui://vibe-cad/editor-1.1.10.html"});
+    assert.ok("text" in previousEditor.contents[0] && "text" in ui.contents[0]);
+    assert.equal(previousEditor.contents[0].text, ui.contents[0].text);
     const html = (ui.contents[0] as any).text;
     assert.ok(html.includes("Vibe CAD"));
     assert.ok(html.includes("3D CAD viewport"));
@@ -208,4 +211,26 @@ test('MCP rigid and display placement acknowledgements validate without geometry
   const changed=await run('inspect_document_state',{documentId:v.document.id,knownRevision:original.document.revision,knownShapeKey:original.geometry.shapeKey});assert.equal((changed.structuredContent as any).placement.kind,'placement');
   const idle=await run('inspect_document_state',{documentId:v.document.id,knownRevision:v.document.revision,knownShapeKey:v.geometry.shapeKey});assert.equal((idle.structuredContent as any).placement,undefined);
  }finally{await client.close();await server.close();}
+});
+
+test("viewport delivery failure does not report a committed edit as a failed CAD operation", async () => {
+  const store = new Store(dir);
+  const server = createMcp(store, async () => { throw Error("forced snapshot failure"); });
+  const client = new Client({ name: "Commit boundary", version: "1" });
+  const [a,b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a); await client.connect(b);
+  const invoke = (name:string,args:Record<string,unknown>) => client.callTool({name,arguments:args,_meta:{"vibe-cad/source":"user"}});
+  try {
+    const created = await invoke("create_document", {name:"Saved despite unavailable view"});
+    assert.ok(!created.isError);
+    const id = (created.structuredContent as any).document.id;
+    const edited = await invoke("create_sketch", {documentId:id,expectedRevision:0,plane:"XY"});
+    assert.ok(!edited.isError);
+    assert.equal((edited.structuredContent as any).viewDelivery.status, "unavailable");
+    assert.match((edited._meta!.viewUnavailable as any).message, /Edit saved at revision 1/);
+    assert.equal((await store.read(id)).sketches.length, 1);
+    const invalid = await invoke("extrude", {documentId:id,expectedRevision:1,sketchId:"missing",distance:2});
+    assert.ok(invalid.isError);
+    assert.equal((await store.read(id)).revision, 1);
+  } finally { await client.close(); await server.close(); }
 });

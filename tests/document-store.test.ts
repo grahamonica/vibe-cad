@@ -168,3 +168,29 @@ test("failed kernel initialization leaves no new persisted document", async () =
   await assert.rejects(store.create("Uncommitted"), /failed to initialize/);
   assert.equal((await persistence.list()).length, 0);
 });
+
+test("a committed assembly returns its validated snapshot without rereading dependencies and releases its queue", async () => {
+  class InterruptedReads extends Persistence {
+    denyReads = false;
+    override async read(id: string) {
+      if (this.denyReads) throw Error("Storage unavailable after commit");
+      return super.read(id);
+    }
+    override async commit(doc: Document, revision: number | null) {
+      await super.commit(doc, revision); this.denyReads = true;
+    }
+  }
+  const persistence = new InterruptedReads(), store = new DocumentStore(persistence, rebuild);
+  const part = await store.create("Part");
+  persistence.denyReads = false;
+  const root = await store.create("Assembly");
+  persistence.denyReads = false;
+  const changed = await store.transact(root.document.id, 0, "Insert", "user", d => {
+    d.components = [{id:"instance",name:"Part",bodyIds:[],source:{documentId:part.document.id},position:[0,0,0],rotation:[0,0,0],explode:[0,0,0],grounded:true}];
+  });
+  assert.equal(changed.document.revision, 1);
+  assert.equal(changed.geometry.dependencyKey, `${part.document.id}@0`);
+  assert.equal(persistence.documents.get(root.document.id)!.revision, 1);
+  await Promise.resolve();
+  assert.equal((store as unknown as {locks:Map<string,unknown>}).locks.size, 0, "Completed queues must not retain models outside cache budgets");
+});

@@ -8,7 +8,7 @@ import {
   context,
   initialize,
   onView,
-  onEditorClosed, editorAlive, noteEditorDocument, closeEditor, closeOtherEditors, setEditorDirty,setInteractionDirty,reloadEditor,takeResumeDocument,
+  onEditorClosed, editorAlive, closeEditor, closeOtherEditors, setEditorDirty,setInteractionDirty,reloadEditor,takeResumeDocument,
   onTransfer,
   type ViewTransfer,
 } from "./bridge.ts";
@@ -87,7 +87,7 @@ export function useCad() {
       total: 0,
     });
   const latest = useRef<View | null>(null),
-    queue = useRef<Promise<unknown>>(Promise.resolve()),
+    queue = useRef<Promise<void>>(Promise.resolve()),
     pendingRef = useRef(0),
     transferRef = useRef(transfer),
     buildRef = useRef(build);
@@ -103,7 +103,6 @@ export function useCad() {
       return;
     if(!editorAlive())return;
     latest.current = v;
-    void noteEditorDocument(v.document.id).catch(e=>setError((e as Error).message));
     setView(v);
     if (!transferRef.current.active) void context(v).catch(() => {});
   };
@@ -121,7 +120,7 @@ export function useCad() {
       transferRef.current = state;
       setTransfer(state);
       if (state.error) setError(state.error);
-      else if (state.active) setError("");
+      else setError("");
     });
     void (async () => {
       try {
@@ -200,7 +199,8 @@ export function useCad() {
   ): Promise<T> => {
     if (buildRef.current.state !== 'idle' && buildRef.current.state !== 'paused' && !['set_selection', 'set_viewport', 'inspect_document', 'inspect_document_state'].includes(name))
       return Promise.reject(Error('Pause the active build before editing the design'));
-    if (transferRef.current.active || transferRef.current.error)
+    if (transferRef.current.error) return Promise.reject(Error(transferRef.current.error));
+    if (transferRef.current.active)
       return Promise.reject(
         Error(
           "Wait for the model to finish loading, or reopen it if loading was interrupted",
@@ -245,7 +245,7 @@ export function useCad() {
       }
     });
     queue.current = job
-      .catch(() => {})
+      .then(() => {}, () => {})
       .finally(() => {
         pendingRef.current--;
         setPending((n) => n - 1);

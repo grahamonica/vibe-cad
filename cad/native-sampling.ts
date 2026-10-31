@@ -18,11 +18,6 @@ export class NativeScope {
   }
 }
 
-export function vectorTuple(vector: r.Vector): Vec3 {
-  try { return vector.toTuple(); }
-  finally { vector.delete(); }
-}
-
 export function curvePoint(curve: r.Edge["curve"], position: number): Vec3 {
   // Avoid the convenience API's temporary gp_Pnt → XYZ → Vector copies.
   const native = curve.wrapped, first = native.FirstParameter();
@@ -31,26 +26,39 @@ export function curvePoint(curve: r.Edge["curve"], position: number): Vec3 {
   finally { point.delete(); }
 }
 
-export function edgePoint(edge: r.Edge, position: number): Vec3 {
+export function edgePoint(edge: r.Edge | r.Wire, position: number): Vec3 {
   const curve = edge.curve;
   try { return curvePoint(curve, position); }
   finally { curve.delete(); }
 }
 
-export function edgeTangent(edge: r.Edge, position: number): Vec3 {
-  const curve = edge.curve;
-  try { return vectorTuple(curve.tangentAt(position)); }
-  finally { curve.delete(); }
+export function edgeTangent(edge: r.Edge | r.Wire, position: number): Vec3 {
+  const scope = new NativeScope();
+  try {
+    const oc = r.getOC() as any, curve = scope.own(edge.curve), native = curve.wrapped;
+    const point = scope.own(new oc.gp_Pnt()), tangent = scope.own(new oc.gp_Vec());
+    const first = native.FirstParameter();
+    native.D1(first + (native.LastParameter() - first) * position, point, tangent);
+    return [tangent.X(), tangent.Y(), tangent.Z()];
+  } finally { scope.dispose(); }
 }
 
-/** Same UV midpoint and oriented normal as Face.normalAt(), without deferred native GC. */
-export function faceSample(face: r.Face): { point: Vec3; normal: Vec3 } {
+/** Oriented surface sampling with explicit ownership, including optional point projection. */
+export function faceSample(face: r.Face, at?: Vec3): { point: Vec3; normal: Vec3 } {
   const scope = new NativeScope();
   try {
     const oc = r.getOC() as any, bounds = face.UVBounds;
     const evaluator = scope.own(new oc.BRepGProp_Face(face.wrapped, false));
     const point = scope.own(new oc.gp_Pnt()), normal = scope.own(new oc.gp_Vec());
-    evaluator.Normal((bounds.uMin + bounds.uMax) / 2, (bounds.vMin + bounds.vMax) / 2, point, normal);
+    let u = (bounds.uMin + bounds.uMax) / 2, v = (bounds.vMin + bounds.vMax) / 2;
+    if (at) {
+      const surface = scope.own(oc.BRep_Tool.Surface(face.wrapped));
+      const input = scope.own(r.asPnt(at));
+      const projection = scope.own(new oc.GeomAPI_ProjectPointOnSurf(input, surface, oc.Extrema_ExtAlgo.Extrema_ExtAlgo_Grad));
+      const uv = projection.LowerDistanceParameters(0, 0);
+      u = uv.U; v = uv.V;
+    }
+    evaluator.Normal(u, v, point, normal);
     return { point: [point.X(), point.Y(), point.Z()], normal: [normal.X(), normal.Y(), normal.Z()] };
   } finally { scope.dispose(); }
 }

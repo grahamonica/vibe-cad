@@ -1,5 +1,5 @@
 import type { View } from "../cad/types.ts";
-import { unpackDisplayBody } from "../cad/view-wire.ts";
+import { unpackDisplayBody, VIEW_LIMITS } from "../cad/view-wire.ts";
 
 /** Parse one pinned view incrementally; never mix revisions or incomplete bodies. */
 export async function receiveView(
@@ -24,14 +24,14 @@ export async function receiveView(
         break;
       }
       decodedBytes+=next.value.byteLength;
-      if(decodedBytes>64*1024*1024)throw Error('This view exceeds the 64 MiB transfer budget. Open a smaller assembly or hide detailed components before retrying.');
+      if(decodedBytes>VIEW_LIMITS.decodedBytes)throw Error('This view exceeds the 64 MiB transfer budget. Open a smaller assembly or hide detailed components before retrying.');
       text += decoder.decode(next.value, { stream: true });
       let end: number;
       while ((end = text.indexOf("\n")) >= 0) {
         const line = text.slice(0, end);
         text = text.slice(end + 1);
         if (!line) continue;
-        if(line.length>32*1024*1024)throw Error('A CAD body exceeds the per-body transfer budget. Simplify the detailed source component before retrying.');
+        if(line.length>VIEW_LIMITS.recordBytes)throw Error('A CAD body exceeds the per-body transfer budget. Simplify the detailed source component before retrying.');
         const record = JSON.parse(line);
         if (complete)
           throw Error("CAD stream contains records after completion");
@@ -71,7 +71,7 @@ export async function receiveView(
           complete = true;
         } else throw Error("Unknown CAD stream record");
       }
-      if(text.length>32*1024*1024)throw Error('A CAD stream record exceeds the transfer budget. Your saved document is unchanged.');
+      if(text.length>VIEW_LIMITS.recordBytes)throw Error('A CAD stream record exceeds the transfer budget. Your saved document is unchanged.');
     }
     if (!complete || !view || text.trim())
       throw Error("CAD stream was interrupted");

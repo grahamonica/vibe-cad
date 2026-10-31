@@ -42,3 +42,17 @@ test('stop during a pending pause checkpoint cannot strand a paused request',asy
  const pending=build.boundary(1,'root',()=>new Promise(r=>{resolve=r;}));
  build.control('cancel');resolve({root:1});await assert.rejects(pending,BuildInterrupted);build.finish();
 });
+
+
+test('one closed transport stops subsequent background requests without suppressing ordinary errors', async () => {
+  const { CadConnection } = await import('../editor/connection.ts');
+  let notified = 0, invoked = 0;
+  const connection = new CadConnection(() => notified++);
+  await assert.rejects(connection.request(async () => { throw Error('Revision conflict'); }), /Revision conflict/);
+  assert.ok(connection.active);
+  const request = () => connection.request(async () => { invoked++; throw Error('Transport closed'); });
+  for(let i=0;i<3;i++)await assert.rejects(request(), /Saved documents remain on disk/);
+  assert.equal(invoked, 1);
+  assert.equal(notified, 1);
+  assert.equal(connection.active, false);
+});

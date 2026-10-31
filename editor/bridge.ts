@@ -1,6 +1,8 @@
+import { CadConnection } from "./connection.ts";
 import { CAD_VERSION } from "../cad/version.ts";
 import type { View } from "../cad/types.ts";
 import { App } from "@modelcontextprotocol/ext-apps";
+import { VIEW_LIMITS } from "../cad/view-wire.ts";
 import { receiveView } from "./view-stream.ts";
 
 let app: App | undefined;
@@ -26,23 +28,35 @@ try{if((performance.getEntriesByType('navigation')[0] as PerformanceNavigationTi
 let editorSessionId=resumeState?.sessionId??globalThis.crypto.randomUUID();
 function hostSessionId(){const id=app?.getHostContext()?.toolInfo?.id;return id===undefined?undefined:`tool:${String(id)}`;}
 export function takeResumeDocument(){const id=resumeState?.documentId;resumeState=undefined;return id;}
-let editorDocumentId:string|undefined,registeredDocumentId:string|undefined,editorDirty=false,interactionDirty=false,draftDirty=false,closed=false,registrySupported=true,registryPending=0;
+let editorDocumentId:string|undefined,registeredDocumentId:string|undefined,editorDirty=false,interactionDirty=false,draftDirty=false,closed=false,registryPending=0;
 let registryQueue:Promise<unknown>=Promise.resolve();
 let closeListener:(()=>void)|undefined,editorTimer:ReturnType<typeof setInterval>|undefined;
 export function onEditorClosed(fn:()=>void){closeListener=fn;}
+const connection = new CadConnection(error => {
+  if (editorTimer) clearInterval(editorTimer);
+  transferGeneration++;
+  transferListener?.({ active: false, received: 0, total: 0, error: error.message });
+});
+function serverTool(name: string, args: Record<string, unknown>, timeout = 600_000) {
+  return connection.request(() => {
+    if (!app) throw Error('Host bridge is not connected');
+    return app.callServerTool({name,arguments:args,_meta:{'vibe-cad/source':'user'}},{timeout});
+  });
+}
+
 function updateDirty(){const dirty=draftDirty||interactionDirty,changed=editorDirty!==dirty;editorDirty=dirty;if(changed)void editorRegistry('heartbeat').catch(()=>{});}
 export function setEditorDirty(dirty:boolean){draftDirty=dirty;updateDirty();}
 export function setInteractionDirty(dirty:boolean){interactionDirty=dirty;updateDirty();}
-export const editorAlive=()=>!closed;
+export const editorAlive=()=>!closed && connection.active;
 function retireEditor(){if(closed)return;closed=true;listener=undefined;transferGeneration++;if(editorTimer)clearInterval(editorTimer);closeListener?.();}
 async function editorRegistry(action:'register'|'heartbeat'|'close'|'close_others'|'teardown_ack'){
- if(!app||!registrySupported||!editorDocumentId||action==='heartbeat'&&registryPending)return;
+ if(!app||!editorDocumentId||action==='heartbeat'&&registryPending)return;
  registryPending++;const documentId=editorDocumentId;
  const task=registryQueue.catch(()=>{}).then(async()=>{
   if(closed&&action!=='teardown_ack')return;
   const operation=action==='heartbeat'&&registeredDocumentId!==documentId?'register':action;
-  const r=await app!.callServerTool({name:'manage_editors',arguments:{action:operation,sessionId:editorSessionId,documentId,dirty:editorDirty},_meta:{'vibe-cad/source':'user'}},{timeout:5000});
-  if(r.isError){const message=r.content?.find(c=>c.type==='text')?.text??'Editor lifecycle request failed';if(/unknown tool|not found|unknown operation/i.test(message))registrySupported=false;throw Error(message);}
+  const r=await serverTool('manage_editors',{action:operation,sessionId:editorSessionId,documentId,dirty:editorDirty},5000);
+  if(r.isError){const message=r.content?.find(c=>c.type==='text')?.text??'Editor lifecycle request failed';throw Error(message);}
   if(operation==='register')registeredDocumentId=documentId;
   const result=r.structuredContent as {closeRequested?:boolean;reloadRequested?:boolean;registerRequired?:boolean}|undefined;
   if(result?.registerRequired)registeredDocumentId=undefined;
@@ -53,7 +67,12 @@ async function editorRegistry(action:'register'|'heartbeat'|'close'|'close_other
  return task;
 }
 export async function noteEditorDocument(id:string){if(closed||editorDocumentId===id&&registeredDocumentId===id)return;editorDocumentId=id;await editorRegistry('register');}
-export async function closeEditor(){if(editorDirty)throw Error('Finish or cancel unsaved edits before closing');await editorRegistry('heartbeat');await editorRegistry('close');if(!closed){retireEditor();await app?.requestTeardown();}}
+export async function closeEditor(){
+ if(editorDirty)throw Error('Finish or cancel unsaved edits before closing');
+ try { if(connection.active){await editorRegistry('heartbeat');await editorRegistry('close');} }
+ catch(error){if(connection.active)throw error;}
+ if(!closed){retireEditor();await app?.requestTeardown();}
+}
 export async function closeOtherEditors(){await editorRegistry('close_others');}
 async function performReload(){
  if(closed)return;if(editorDirty)throw Error('Finish or cancel unsaved edits before reloading');
@@ -92,7 +111,7 @@ export async function initialize() {
     await connected;
     const identity=hostSessionId();if(identity)editorSessionId=identity;
     if(!resumeState&&identity){
-      try{const r=await app!.callServerTool({name:'manage_editors',arguments:{action:'resume',sessionId:editorSessionId},_meta:{'vibe-cad/source':'user'}},{timeout:5000});const id=(r.structuredContent as any)?.resumeDocumentId;if(!r.isError&&typeof id==='string')resumeState={documentId:id,sessionId:editorSessionId};}catch{}
+      try{const r=await serverTool('manage_editors',{action:'resume',sessionId:editorSessionId},5000);const id=(r.structuredContent as any)?.resumeDocumentId;if(!r.isError&&typeof id==='string')resumeState={documentId:id,sessionId:editorSessionId};}catch{}
     }
     if(resumeState)editorDocumentId=resumeState.documentId;
     editorTimer=setInterval(()=>{if(!closed)void editorRegistry('heartbeat').catch(()=>{});},5000);
@@ -105,6 +124,12 @@ async function readToolView(
   recover = true,
 ): Promise<View | undefined> {
   if(closed)return;
+  const unavailable = meta?.viewUnavailable as { message: string } | undefined;
+  if (unavailable) {
+    transferGeneration++;
+    transferListener?.({ active: false, received: 0, total: 0, error: unavailable.message });
+    throw Error(unavailable.message);
+  }
   if (meta?.view) {
     transferGeneration++;
     transferListener?.({ active: false, received: 0, total: 0 });
@@ -119,7 +144,7 @@ async function readToolView(
     snapshot.encoding !== "deflate-ndjson-base64" ||
     !Number.isInteger(snapshot.count) ||
     snapshot.count < 1 ||
-    snapshot.count > 128
+    snapshot.count > Math.ceil(VIEW_LIMITS.compressedBytes / VIEW_LIMITS.chunkBytes)
   )
     throw Error("Invalid CAD editor snapshot");
   const generation = ++transferGeneration;
@@ -138,9 +163,9 @@ async function readToolView(
           controller.close();
           return;
         }
-        const resource = await app!.readServerResource({
+        const resource = await connection.request(() => app!.readServerResource({
           uri: `${snapshot.uriPrefix}${index}`,
-        });
+        }));
         const item = resource.contents[0];
         if (!item || !("text" in item))
           throw Error("CAD editor snapshot chunk is missing");
@@ -184,7 +209,7 @@ async function readToolView(
     const documentId = snapshot.documentId ?? hintDocumentId;
     if (recover && documentId && /snapshot.*unavailable|snapshot.*missing/i.test((e as Error).message)) {
       try {
-      const refreshed = await app!.callServerTool({ name: 'inspect_document', arguments: { documentId }, _meta: { 'vibe-cad/source': 'user' } });
+      const refreshed = await serverTool('inspect_document', { documentId });
       if (generation !== transferGeneration) return;
       if (!refreshed.isError) return readToolView(refreshed._meta, documentId, false);
       } catch { /* report a recoverable transfer error below */ }
@@ -204,14 +229,7 @@ export async function call<T = any>(
 ): Promise<T> {
   await ready;
   if (!app) throw Error("Host bridge is not connected");
-  const result = await app.callServerTool(
-    {
-      name,
-      arguments: args,
-      _meta: { "vibe-cad/source": "user" },
-    },
-    { timeout: 600_000 },
-  );
+  const result = await serverTool(name, args);
   if (result.isError)
     throw Error(
       result.content?.find((c) => c.type === "text")?.text ??

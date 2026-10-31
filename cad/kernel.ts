@@ -74,7 +74,7 @@ export function initKernel() {
         // Load the replaceable kernel bytes from the local plugin package.
         locateFile: (file: string) => file,
         print: () => {},
-        printErr: () => {},
+        printErr: (message: unknown) => process.stderr.write(`[CAD kernel] ${String(message).slice(0, 2048)}\n`),
       }),
     )
     .then((oc) => {
@@ -367,8 +367,8 @@ function projectEdge(edge: r.Edge, frame: Frame): { type: "line" | "circle" | "a
   const local = (p: Vec3): [number, number] => [dot(sub(p, frame.origin), frame.xDir), dot(sub(p, frame.origin), frame.yDir)];
   const scale = Math.max(1, edge.length);
   if (edge.geomType === "LINE") {
-    const a = local(edge.startPoint.toTuple()),
-      b = local(edge.endPoint.toTuple());
+    const a = local(edgePoint(edge, 0)),
+      b = local(edgePoint(edge, 1));
     if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-6 * scale) throw Error("This edge runs perpendicular to the sketch plane");
     return { type: "line", values: { x1: a[0], y1: a[1], x2: b[0], y2: b[1] } };
   }
@@ -377,11 +377,11 @@ function projectEdge(edge: r.Edge, frame: Frame): { type: "line" | "circle" | "a
     if (!c || Math.abs(Math.abs(dot(c.normal, frame.normal)) - 1) > 1e-6)
       throw Error("Only circles and arcs parallel to the sketch plane can be converted");
     const center = local(c.center);
-    const start = edge.startPoint.toTuple(),
-      end = edge.endPoint.toTuple();
+    const start = edgePoint(edge, 0),
+      end = edgePoint(edge, 1);
     if (length(sub(start, end)) < 1e-7 * scale) return { type: "circle", values: { x: center[0], y: center[1], radius: c.radius } };
     const a = local(start),
-      m = local(edge.pointAt(0.5).toTuple()),
+      m = local(edgePoint(edge, 0.5)),
       b = local(end);
     return { type: "arc", values: { x1: a[0], y1: a[1], xm: m[0], ym: m[1], x2: b[0], y2: b[1] } };
   }
@@ -554,8 +554,8 @@ class Build {
         return frameFromPoints(d.points);
       case "normal-to-edge": {
         const edge = this.findEdge(d.edge),
-          origin = edge.pointAt(d.position).toTuple(),
-          normal = unit(edge.tangentAt(d.position).toTuple()),
+          origin = edgePoint(edge, d.position),
+          normal = unit(edgeTangent(edge, d.position)),
           { xDir, yDir } = axesFor(normal);
         return { origin, xDir, yDir, normal };
       }
@@ -595,8 +595,8 @@ class Build {
       case "edge": {
         const edge = this.findEdge(ref.ref);
         if (edge.geomType === "LINE") {
-          const a = edge.startPoint.toTuple(),
-            b = edge.endPoint.toTuple();
+          const a = edgePoint(edge, 0),
+            b = edgePoint(edge, 1);
           return { origin: a, direction: unit(sub(b, a)) };
         }
         const c = circleOf(edge);
@@ -945,18 +945,11 @@ function sweepTool(ctx: Build, f: Feature): r.Shape3D {
     finally { drawing.delete(); }
     if (!(mapped instanceof r.Sketch)) throw Error("Sweep path must be one wire");
     path = mapped;
-    const tangent = path.wire.tangentAt(1e-9),
-      start = path.wire.startPoint;
-    try {
-      const direction = tangent.toTuple(),
-        normal = profilePlane.zDir.toTuple();
-      if (Math.abs(dot(direction, normal)) / length(direction) < 0.999999)
-        throw Error("Sweep profile plane must be perpendicular to the path at its start");
-      vertex = r.makeVertex(start);
-    } finally {
-      tangent.delete();
-      start.delete();
-    }
+    const direction = edgeTangent(path.wire, 1e-9),
+      start = edgePoint(path.wire, 0), normal = profilePlane.zDir.toTuple();
+    if (Math.abs(dot(direction, normal)) / length(direction) < 0.999999)
+      throw Error("Sweep profile plane must be perpendicular to the path at its start");
+    vertex = r.makeVertex(start);
     face = profile.face();
     if (r.measureDistanceBetween(face, vertex!) > 1e-5)
       throw Error("Sweep path must start on the profile; use Reverse path or move the sketch plane");
@@ -1123,8 +1116,8 @@ function flangeTool(ctx: Build, f: Feature, body: r.Shape3D): r.Shape3D {
   if (!(angle > 0 && angle <= 180)) throw Error("flange angle must be between 0 and 180 degrees");
   const edge = resolve(body, p.edge) as r.Edge;
   if (!(edge instanceof r.Edge) || edge.geomType !== "LINE") throw Error("flanges go on straight edges");
-  let A = edge.startPoint.toTuple(),
-    B = edge.endPoint.toTuple();
+  let A = edgePoint(edge, 0),
+    B = edgePoint(edge, 1);
   const faces = body.faces.filter((face) => face.geomType === "PLANE" && face.edges.some((e) => e.isSame(edge)));
   // Of the two faces at the edge, the side face is the sheet's thickness (T
   // across, square to the other): on the base outline or at the end of a flange.
@@ -1339,9 +1332,9 @@ function edgeSelector(
     return (edge) => (selected.some((e) => e.isSame(edge)) ? value : null);
   }
   if (p.selector === "vertical")
-    return (edge) => (Math.abs(edge.tangentAt(0.5).toTuple()[2]) > 0.999 ? value : null);
+    return (edge) => (Math.abs(edgeTangent(edge, 0.5)[2]) > 0.999 ? value : null);
   if (p.selector === "horizontal")
-    return (edge) => (Math.abs(edge.tangentAt(0.5).toTuple()[2]) < 0.001 ? value : null);
+    return (edge) => (Math.abs(edgeTangent(edge, 0.5)[2]) < 0.001 ? value : null);
   return undefined;
 }
 /**
@@ -1363,8 +1356,8 @@ function moveFaceShape(body: r.Shape3D, faces: r.Face[], offset: number, feature
       const neighbor = (around.get(edge.hashCode) ?? []).find((g) => !g.isSame(face) && g.edges.some((e) => e.isSame(edge)));
       if (!neighbor) continue;
       for (const t of [0.2, 0.5, 0.8]) {
-        const at = edge.pointAt(t);
-        if (Math.abs(dot(unit(neighbor.normalAt(at).toTuple()), n)) > 1e-6)
+        const at = edgePoint(edge, t);
+        if (Math.abs(dot(unit(faceSample(neighbor, at).normal), n)) > 1e-6)
           throw Error("the faces around a moved face must be square to it; use a cut or extrude for other shapes");
       }
     }
@@ -1407,9 +1400,9 @@ function threadOn(body: r.Shape3D, face: r.Face, p: Record<string, any>, feature
   const direction = reverse ? mul(axis, -1) : axis,
     startPoint = at(reverse ? hi : lo);
   // Internal when the face looks toward its axis (a hole), external on a shaft.
-  const probe = face.pointOnSurface(0.5, 0.5).toTuple(),
+  const { point: probe, normal } = faceSample(face),
     radial = sub(probe, add(startPoint, mul(direction, dot(sub(probe, startPoint), direction))));
-  const internal = dot(unit(face.normalAt(probe).toTuple()), unit(radial)) < 0;
+  const internal = dot(unit(normal), unit(radial)) < 0;
   const D = p.diameter as number,
     P = p.pitch as number;
   const record = { faceId: "", label: p.label as string, origin: startPoint, direction, radius, diameter: D, length, pitch: P, internal, modeled: p.mode === "modeled", through: length >= span - 1e-6, ...(p.hand === "left" ? { leftHand: true } : {}) };
@@ -1436,7 +1429,7 @@ function threadOn(body: r.Shape3D, face: r.Face, p: Record<string, any>, feature
   const start = sub(startPoint, mul(direction, P)),
     helix = r.makeHelix(P, length + P, internal ? radius : (D - 1.226869 * P) / 2, start, direction, p.hand === "left");
   // The profile lies in the plane through the axis where the helix begins.
-  const x0 = unit(sub(helix.startPoint.toTuple(), start)),
+  const x0 = unit(sub(edgePoint(helix, 0), start)),
     plane = new r.Plane(start, x0, cross(direction, x0));
   try {
     let pen = r.draw(profile[0]);
@@ -1603,8 +1596,8 @@ function weldBeads(body: r.Shape3D, edges: r.Edge[], leg: number, featureId: str
     if (edge.geomType !== "LINE") throw Error("weld beads go along straight edges");
     const faces = body.faces.filter((face) => face.geomType === "PLANE" && face.edges.some((e) => e.isSame(edge)));
     if (faces.length !== 2) throw Error("a weld bead needs the edge between two flat faces");
-    const A = edge.startPoint.toTuple(),
-      B = edge.endPoint.toTuple(),
+    const A = edgePoint(edge, 0),
+      B = edgePoint(edge, 1),
       e = unit(sub(B, A)),
       mid = mul(add(A, B), 0.5);
     // In each face: the direction square to the edge, pointing into the face.
@@ -1614,7 +1607,7 @@ function weldBeads(body: r.Shape3D, edges: r.Edge[], leg: number, featureId: str
         c = r.measureShapeSurfaceProperties(face).centerOfMass;
       return dot(sub(c, mid), d) >= 0 ? d : mul(d, -1);
     });
-    const n1 = unit(faces[0].normalAt().toTuple());
+    const n1 = unit(faceNormal(faces[0]));
     // An inside corner: the second face rises on the side the first face looks toward.
     if (dot(n1, d2) <= 1e-6) throw Error("weld beads go in inside corners, where two faces meet at less than 180°");
     const bead = r.makePolygon([A, add(A, mul(d1, leg)), add(A, mul(d2, leg))]);
@@ -2845,19 +2838,27 @@ async function flatShape(doc: Document, bodyId: string) {
 }
 /** Cut edges of an unrolled shape; seams between the base and a flange bound two faces and are not cut. */
 function flatSegments(shape: r.AnyShape) {
+  const scope = new NativeScope();
+  try {
     const faceCount = new Map<number, number>();
-    for (const face of (shape as any).faces as r.Face[]) for (const edge of face.edges) faceCount.set(edge.hashCode, (faceCount.get(edge.hashCode) ?? 0) + 1);
+    for (const face of scope.all((shape as any).faces as r.Face[]))
+      for (const edge of scope.all(face.edges))
+        faceCount.set(edge.hashCode, (faceCount.get(edge.hashCode) ?? 0) + 1);
     const segments: [[number, number], [number, number]][] = [];
-    for (const edge of (shape as any).edges as r.Edge[]) {
+    for (const edge of scope.all((shape as any).edges as r.Edge[])) {
       if ((faceCount.get(edge.hashCode) ?? 0) > 1) continue;
-      const n = edge.geomType === "LINE" ? 1 : 32;
-      for (let i = 0; i < n; i++) {
-        const a = edge.pointAt(i / n).toTuple(),
-          b = edge.pointAt((i + 1) / n).toTuple();
-        segments.push([[a[0], a[1]], [b[0], b[1]]]);
-      }
+      const n = edge.geomType === "LINE" ? 1 : 32, curve = edge.curve;
+      try {
+        let a = curvePoint(curve, 0);
+        for (let i = 1; i <= n; i++) {
+          const b = curvePoint(curve, i / n);
+          segments.push([[a[0], a[1]], [b[0], b[1]]]);
+          a = b;
+        }
+      } finally { curve.delete(); }
     }
     return segments;
+  } finally { scope.dispose(); }
 }
 export async function flatPattern(doc: Document, bodyId: string) {
   const { shape, bends, thickness } = await flatShape(doc, bodyId);
@@ -3260,10 +3261,10 @@ export async function measureGeometry(
       const direction = (item: r.Face | r.Edge) =>
         item instanceof r.Face
           ? item.geomType === "PLANE"
-            ? item.normalAt().toTuple()
+            ? faceNormal(item)
             : undefined
           : item.geomType === "LINE"
-            ? item.tangentAt(0.5).toTuple()
+            ? edgeTangent(item, 0.5)
             : undefined;
       const [da, db] = items.map(direction);
       if (da && db) {
@@ -3845,7 +3846,7 @@ export async function renderDrawing(doc: Document, drawingId: string, format: "s
         let solids = solidsFor(!!v.exploded);
         let sectionSegments: [Vec2, Vec2][] | undefined;
         if (cut) {
-          const plane = new r.Plane(cut.origin, camera.x, cut.normal);
+          const plane = new r.Plane(cut.origin, camera.x, cut.normal), sectionScope = new NativeScope();
           try {
             const kept: r.Shape3D[] = [];
             for (const s of solids) {
@@ -3859,24 +3860,27 @@ export async function renderDrawing(doc: Document, drawingId: string, format: "s
             solids = kept;
             sectionSegments = [];
             for (const s of kept)
-              for (const face of s.faces) {
+              for (const face of sectionScope.all(s.faces)) {
                 if (face.geomType !== "PLANE") continue;
                 const fn = faceNormal(face),
                   fc = r.measureShapeSurfaceProperties(face).centerOfMass;
                 if (Math.abs(Math.abs(dot(fn, cut.normal)) - 1) > 1e-6 || Math.abs(dot(sub(fc, cut.origin), cut.normal)) > 1e-5) continue;
-                for (const edge of face.edges) {
+                for (const edge of sectionScope.all(face.edges)) {
                   let prev: Vec2 | undefined;
                   const steps = edge.geomType === "LINE" ? 1 : 24;
-                  for (let i = 0; i <= steps; i++) {
-                    const p = edge.pointAt(i / steps).toTuple(),
-                      q: Vec2 = [dot(p, camera.x), -dot(p, camera.y)];
-                    if (prev) sectionSegments.push([prev, q]);
-                    prev = q;
-                  }
+                  const curve = edge.curve;
+                  try {
+                    for (let i = 0; i <= steps; i++) {
+                      const p = curvePoint(curve, i / steps),
+                        q: Vec2 = [dot(p, camera.x), -dot(p, camera.y)];
+                      if (prev) sectionSegments.push([prev, q]);
+                      prev = q;
+                    }
+                  } finally { curve.delete(); }
                 }
               }
           } finally {
-            plane.delete();
+            sectionScope.dispose(); plane.delete();
           }
         }
         // makeCompound consumes its inputs; give it clones.

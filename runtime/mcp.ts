@@ -1,5 +1,5 @@
 import { CAD_VERSION } from "../cad/version.ts";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   registerAppResource,
   registerAppTool,
@@ -25,7 +25,7 @@ export const modelToolNames = new Set([
   "import_vendor_part", "export_file", "control_build", "compact_storage",
   "engine_info", "manage_editors", "inspect_design", "edit_design", "validate_design",
 ]);
-export function createMcp(store: Store) {
+export function createMcp(store: Store, deliver = deliverView) {
   const server = new McpServer(
     { name: "vibe-cad", version: CAD_VERSION },
     {
@@ -34,10 +34,10 @@ export function createMcp(store: Store) {
     },
   );
   registerViewResources(server, store);
-  for(const resourceUri of [uiUri, "ui://vibe-cad/editor-1.1.9.html", "ui://vibe-cad/editor-1.1.8.html", "ui://vibe-cad/editor-1.1.2.html", "ui://vibe-cad/editor-1.1.1.html", "ui://vibe-cad/editor-1.1.html", "ui://vibe-cad/editor.html"]) registerAppResource(server, resourceUri===uiUri?"CAD editor":"CAD editor compatibility", resourceUri, {}, async () => ({
+  const readEditor = async (uri: URL) => ({
     contents: [
       {
-        uri: resourceUri,
+        uri: uri.href,
         mimeType: RESOURCE_MIME_TYPE,
         text: await readFile(
           process.env.VIBE_CAD_ROOT
@@ -56,7 +56,14 @@ export function createMcp(store: Store) {
         },
       },
     ],
-  }));
+  });
+  registerAppResource(server, "CAD editor", uiUri, {}, readEditor);
+  registerAppResource(server, "Saved editor link", "ui://vibe-cad/editor.html", {}, readEditor);
+  // Saved tool messages can reference an older version. Resolve those links
+  // against this process's immutable bundle, without a growing alias list.
+  server.registerResource("Versioned editor links",
+    new ResourceTemplate("ui://vibe-cad/editor-{version}.html", {list: undefined}),
+    {mimeType: RESOURCE_MIME_TYPE}, readEditor);
   for (const tool of toolset(store)) {
     // Editing an existing model must not open another host panel for every feature or batch.
     const editorTool = tool.name === 'open_cad';
@@ -124,6 +131,18 @@ export function createMcp(store: Store) {
                   base64: (await readFile(result.path)).toString("base64"),
                 }
               : undefined;
+          // Tool completion and viewport delivery are different outcomes. Never
+          // turn a committed edit into an operation error because its view fails.
+          let delivery: Record<string, unknown> = {};
+          if (shown && (editorTool || source === 'user')) {
+            try { delivery = await deliver(store, view); }
+            catch (error) {
+              const message = `${tool.readOnly ? 'Document loaded' : 'Edit saved'} at revision ${view.document.revision}, but its view could not be delivered: ${error instanceof Error ? error.message : String(error)}`;
+              const failure = { documentId: view.document.id, revision: view.document.revision, message };
+              delivery = { viewUnavailable: failure };
+              Object.assign(structuredContent, { viewDelivery: { status: 'unavailable', ...failure } });
+            }
+          }
           return {
             content: [
               { type: "text", text: JSON.stringify(structuredContent) },
@@ -143,7 +162,7 @@ export function createMcp(store: Store) {
                           ui: { resourceUri: uiUri },
                         }
                       : {}),
-                    ...(shown && (editorTool || source === 'user') ? await deliverView(store, view) : {}),
+                    ...delivery,
                     ...(download ? { download } : {}),
                   }
                 : undefined,

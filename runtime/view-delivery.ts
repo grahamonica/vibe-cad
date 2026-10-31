@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { createDeflate } from "node:zlib";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import {
   ResourceTemplate,
   type McpServer,
 } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Store } from "../cad/store.ts";
 import type { View } from "../cad/types.ts";
-import { packDisplayBody } from "../cad/view-wire.ts";
+import { packDisplayBody, VIEW_LIMITS } from "../cad/view-wire.ts";
 
 // Large vendor assemblies cannot fit in one MCP message. Pin the exact result
 // snapshot and deliver display-precision meshes through bounded, app-readable resources.
@@ -17,8 +18,8 @@ const caches = new WeakMap<
 >();
 // A multiple of three makes independently encoded slices concatenate into the
 // existing base64 stream. Retain compressed bytes, not expanded UTF-16 strings.
-const chunkBytes = 384 * 1024;
-const deliveryBudget = 32 * 1024 * 1024;
+const chunkBytes = VIEW_LIMITS.chunkBytes;
+const deliveryBudget = VIEW_LIMITS.compressedBytes;
 function cache(store: Store) {
   let entries = caches.get(store);
   if (!entries) caches.set(store, (entries = new Map()));
@@ -29,30 +30,45 @@ function cache(store: Store) {
 export async function deliverView(store: Store, view: View): Promise<Record<string, unknown>> {
   const values = view.geometry.bodies.reduce((n, body) => n + body.mesh.vertices.length + body.mesh.normals.length + body.mesh.triangles.length + body.edges.lines.length, 0);
   // Do not first allocate a full decimal JSON copy of a known-large mesh.
-  if (values < 32768 && Buffer.byteLength(JSON.stringify(view)) <= 256 * 1024) return { view };
+  if (values < 32768 && Buffer.byteLength(JSON.stringify(view)) <= VIEW_LIMITS.inlineBytes) return { view };
   const header = { ...view, geometry: { ...view.geometry, bodies: [] } };
+  let decodedBytes = 0;
+  function record(value: unknown) {
+    const text = JSON.stringify(value) + "\n";
+    const bytes = Buffer.byteLength(text);
+    if (bytes > VIEW_LIMITS.recordBytes) throw Error("A CAD view record exceeds its delivery budget");
+    decodedBytes += bytes;
+    if (decodedBytes > VIEW_LIMITS.decodedBytes) throw Error("CAD view exceeds its decoded delivery budget");
+    return text;
+  }
   function* records() {
-      yield JSON.stringify({
-        type: "header",
-        view: header,
-        bodyCount: view.geometry.bodies.length,
-      }) + "\n";
-      for (const body of view.geometry.bodies)
-        yield JSON.stringify({ type: "body", body: packDisplayBody(body, bytes => Buffer.from(bytes).toString("base64")) }) + "\n";
-      yield JSON.stringify({ type: "complete" }) + "\n";
+    yield record({ type: "header", view: header, bodyCount: view.geometry.bodies.length });
+    for (const body of view.geometry.bodies)
+      yield record({ type: "body", body: packDisplayBody(body, bytes => Buffer.from(bytes).toString("base64")) });
+    yield record({ type: "complete" });
   }
   // Compress one record at a time instead of allocating decimal/binary copies
   // of the entire assembly. The retained memory budget stays at 32 MiB.
-  const stream = Readable.from(records(), { highWaterMark: 1 }).pipe(createDeflate());
+  const source = Readable.from(records(), { highWaterMark: 1 });
+  const stream = createDeflate();
+  // pipeline propagates producer errors to the consumer and tears down both
+  // streams. Plain pipe leaves generator errors as uncaught process errors.
+  const finished = pipeline(source, stream).then(() => undefined, error => error);
   const blocks: Buffer[] = [];
   let bytes = 0;
-  for await (const block of stream) {
-    bytes += block.length;
-    if (bytes > deliveryBudget) {
-      stream.destroy();
-      throw Error("CAD editor snapshot exceeds its delivery budget");
+  try {
+    for await (const block of stream) {
+      bytes += block.length;
+      if (bytes > deliveryBudget)
+        throw Error("CAD editor snapshot exceeds its delivery budget");
+      blocks.push(block);
     }
-    blocks.push(block);
+    const error = await finished;
+    if (error) throw error;
+  } finally {
+    source.destroy();
+    stream.destroy();
+    await finished;
   }
   const data = Buffer.concat(blocks, bytes);
   const entries = cache(store);

@@ -44,7 +44,7 @@ export class DocumentStore {
   readonly buildControl = new BuildControl();
   readonly editors = new EditorSessions();
   readonly directory: string;
-  private locks = new Map<string, Promise<unknown>>();
+  private locks = new Map<string, Promise<void>>();
   private previews = new Map<string, Preview>();
   private cache = new Map<string, { revision: number; links: string; geometry: Geometry }>();
   private remember(id: string, entry: { revision: number; links: string; geometry: Geometry }) {
@@ -221,9 +221,10 @@ export class DocumentStore {
     doc.updatedAt = new Date().toISOString();
     doc.history.push({ id: this.uuid(), revision: 1, at: doc.updatedAt, description, source, snapshot: snapshot(doc) });
     doc.historyIndex = 1;
+    const view = this.viewOf(doc, geometry, links);
     await this.persistence.commit(doc, null);
     this.remember(doc.id, { revision: doc.revision, links, geometry });
-    return this.view(doc);
+    return view;
   }
   async create(
     name: string,
@@ -233,9 +234,10 @@ export class DocumentStore {
     const doc = this.blank(name, owner, source);
     validateDocument(doc);
     const { geometry, links } = await this.rebuild(doc);
+    const view = this.viewOf(doc, geometry, links);
     await this.persistence.commit(doc, null);
     this.remember(doc.id, { revision: doc.revision, links, geometry });
-    return this.view(doc);
+    return view;
   }
   private blank(name: string, owner: string, source: "user" | "assistant") {
     const now = new Date().toISOString(),
@@ -277,6 +279,12 @@ export class DocumentStore {
     const geometry = cached?.revision === doc.revision && cached.links === links
       ? cached.geometry : await this.build(await this.kernelDocument(doc));
     this.remember(doc.id, { revision: doc.revision, links, geometry });
+    return this.viewOf(doc, geometry, links);
+  }
+  /** Build the response before committing; publishing a saved edit must not
+   * perform another dependency read or kernel rebuild after the commit. */
+  private viewOf(doc: Document, geometry: Geometry, links: string): View {
+    geometry.shapeKey ??= this.uuid();
     // Show converted edges where the model has them, even before the next save.
     const sketches = geometry.sketchUpdates ? structuredClone(doc.sketches) : doc.sketches;
     if (geometry.sketchUpdates) applySketchUpdates({ sketches }, geometry);
@@ -410,10 +418,10 @@ export class DocumentStore {
   private locked<T>(id: string, fn: () => Promise<T>): Promise<T> {
     const prior = this.locks.get(id) ?? Promise.resolve(),
       next = prior.then(fn, fn);
-    this.locks.set(
-      id,
-      next.catch(() => {}),
-    );
+    // A queue tail must never retain the completed View/Geometry result.
+    const tail = next.then(() => {}, () => {});
+    this.locks.set(id, tail);
+    void tail.then(() => { if (this.locks.get(id) === tail) this.locks.delete(id); });
     return next;
   }
   async transact(
@@ -508,10 +516,11 @@ export class DocumentStore {
       });
       next.historyIndex = next.history.length - 1;
       trimHistory(next);
+      const view = this.viewOf(next, geometry, links);
       await this.persistence.commit(next, doc.revision);
       this.previews.delete(id);
       this.remember(id, { revision: next.revision, links, geometry });
-      return this.view(next);
+      return view;
     });
   }
   async setViewport(id: string, viewport: NonNullable<Document['viewport']>) {
@@ -536,8 +545,9 @@ export class DocumentStore {
           throw Error("Selection no longer exists; reselect geometry");
       doc.selection = selection;
       if (viewport) doc.viewport = viewport;
+      const updated = this.viewOf(doc, view.geometry, view.geometry.dependencyKey ?? "");
       await this.persistence.commit(doc, doc.revision);
-      return this.view(doc);
+      return updated;
     });
   }
   async history(
@@ -570,10 +580,11 @@ export class DocumentStore {
       validateDocument(next);
       const { geometry, links } = await this.rebuild(next);
       applySketchUpdates(next, geometry);
+      const view = this.viewOf(next, geometry, links);
       await this.persistence.commit(next, doc.revision);
       this.previews.delete(id);
       this.remember(id, { revision: next.revision, links, geometry });
-      return this.view(next);
+      return view;
     });
   }
   async restore(

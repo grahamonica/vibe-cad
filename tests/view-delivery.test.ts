@@ -98,6 +98,9 @@ test("large editor views stay below MCP message limits and retain an exact revis
       JSON.parse(JSON.stringify(view.geometry.bodies[0].topology)),
     );
     assert.equal(restored.geometry.bodies[0].volume, 48000);
+    const invalid = {...view,geometry:{...view.geometry,bodies:[{...view.geometry.bodies[0],mesh:{...transferMesh,triangles:[-1]}}]}};
+    await assert.rejects(deliverView(store, invalid), /Invalid display triangle index/);
+    assert.ok((await deliverView(store, view)).view, "A producer failure must not poison later deliveries");
     await assert.rejects(
       client.readResource({ uri: chunks.uriPrefix + chunks.count }),
       /unavailable/,

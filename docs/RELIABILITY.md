@@ -1,0 +1,31 @@
+# CAD execution and resource ownership
+
+The document store owns committed design state. The geometry worker validates candidates. The MCP adapter publishes command outcomes. The view protocol carries display data. The editor owns its connection, scene and unsaved interactions. A failure in one responsibility must not silently replay work in another.
+
+## Findings addressed in the durability audit
+
+| Cause | Correction | Verification |
+| --- | --- | --- |
+| The per-document lock map retained fulfilled promises containing full views, outside geometry-cache limits. Worker and editor queue tails also retained their last results. | Queue tails resolve to void; completed document entries are removed only when they are still the latest tail. | Transaction checks verify serialization, conflict protection and released queue entries. The actual large-assembly replay ended with zero retained transaction queues. |
+| A committed edit called `view()` again, which could reread changed/unavailable dependencies or rebuild after saving. The MCP adapter also treated display-delivery failure as command failure. | Store responses use the validated geometry and dependency snapshot prepared before commit. Display delivery reports a separate `viewDelivery` status and the saved revision. The editor keeps the last complete view and blocks stale-geometry edits until explicitly refreshed. | A dependency-read failure after commit cannot invalidate the returned assembly transaction. Injected delivery failure preserves the successful MCP result and the saved revision; invalid geometry still fails without committing. |
+| Stream producers used plain `pipe`, which does not forward source errors to the destination. A packing/generator exception could become an uncaught process error. | Use the standard stream pipeline, propagate the original error, and tear down both streams. Producer and consumer share transfer limits. Numeric encoding is selected without allocating a full decimal copy of large arrays. | A failed producer rejects delivery without poisoning a later delivery. Actual assembly resources round-trip through the browser receiver within the existing limits. |
+| Certain native faults were silently retried in another worker. Queued work could outlive cancellation. | Retire the damaged worker, preserve the original failure and never replay the command. Cancellation invalidates previously queued requests. A later explicit request can start a worker after termination finishes. | Existing worker checks now require one attempt, healthy-worker reuse for ordinary validation failures, cancellation of queued work and rejection of stale-worker events. |
+| Independent polls and heartbeat requests continued calling a closed transport, multiplying one disconnect into repeated warnings. | All backend requests share one connection state. A confirmed closed transport stops further requests. Local scene teardown remains possible without a working backend. | A connection check verifies that three attempted polls invoke the disconnected backend once and notify once; ordinary errors do not disconnect the session. |
+| Remaining edge/face sampling paths deferred native adaptor/vector lifetimes, particularly in export and measurement loops. | Reuse explicitly owned sampling helpers, with immediate cleanup of points, vectors, curves, projections, sampled faces and edges. Native stderr is no longer discarded. | Scoped sweep, direct-face edit, sheet-metal export, thread and weld checks; detailed forest edits after loading the real assembly, without native fault replay. |
+| Editor resource aliases accumulated hardcoded release versions; lifecycle code silently tolerated a backend missing its bundled APIs. | A resource template serves saved versioned links from the current process's immutable bundle. The current editor and backend use one API contract. | MCP checks read a saved older editor URI and the current URI and compare their HTML. |
+
+## Boundaries retained deliberately
+
+- Geometry validation happens before document commit. Revision conflicts remain explicit. Stale topology is never silently reassigned.
+- Invalid user geometry does not retire a healthy worker. A native fault or timeout retires that worker and reports the failure; it does not authorize replay.
+- Display meshes use the viewport's float32 precision. CAD topology, solid measurements, dimensions and exports retain their existing precision.
+- Render-cache eviction is based on active documents and rebuild cost within the existing estimated budget. Transfer retention remains limited to 32 MiB compressed data; the decoded stream and record limits remain 64 MiB and 32 MiB. One shared declaration defines the producer/consumer contract.
+- Re-fetching an expired display snapshot is a bounded read of the saved document, not repetition of a modeling command.
+- The host owns its tabs and stdio process. A healthy editor can release its scene and request host teardown. Code in a crashed renderer cannot execute its own Close button. Host acknowledgement and a requested close remain distinct.
+- An installed update does not replace an already-running process. Verify the active version and native embedded editor after activation. Protocol tests and isolated model replays do not prove native host rendering or zero future crashes.
+
+## Practical verification
+
+Use the focused checks for the changed boundary and one representative real model sequence. Do not run the full benchmark collection on every edit. The audit sequence copied the current 54-document assembly and its eight imported blobs into a disposable store, loaded 86 rendered bodies, passed the actual resource stream through the browser receiver, changed and restored the detailed forest, and reopened the assembly in the same session. It preserved all original forest entities and final body volumes, CAD selection metadata and GPU display coordinates. The disposable store was removed; canonical document bytes were unchanged.
+
+The host logs establish two renderer exits with code 5 on October 30. They do not establish the memory cause of those exits. October 31 logs also contain thousands of repeated closed-transport warning lines; those lines are not separate crash events. These are distinct observations, not a basis for claiming a measured overall crash-rate reduction.

@@ -10,7 +10,9 @@ export class KernelWorkerClient {
   private worker?: KernelWorker;
   private sequence = 0;
   private pending = new Map<number, Pending>();
-  private chain: Promise<unknown> = Promise.resolve();
+  private chain: Promise<void> = Promise.resolve();
+  private stopping: Promise<unknown> = Promise.resolve();
+  private generation = 0;
 
   constructor(private createWorker: () => KernelWorker, private timeoutMs = 300_000) {}
 
@@ -20,12 +22,7 @@ export class KernelWorkerClient {
     this.worker = worker;
     const failed = (error: Error) => {
       if (this.worker !== worker) return;
-      this.worker = undefined;
-      for (const p of this.pending.values()) {
-        clearTimeout(p.timer);
-        p.reject(error);
-      }
-      this.pending.clear();
+      void this.close(error).catch(() => {});
     };
     worker.on("message", ({ id, result, error }) => {
       if (this.worker !== worker) return;
@@ -44,10 +41,7 @@ export class KernelWorkerClient {
     return new Promise<T>((resolve, reject) => {
       const worker = this.getWorker(), id = ++this.sequence;
       const timer = setTimeout(() => {
-        this.pending.delete(id);
-        if (this.worker === worker) this.worker = undefined;
-        void worker.terminate();
-        reject(Error(`CAD kernel exceeded the ${this.timeoutMs / 1000}-second processing limit; the operation was stopped`));
+        void this.close(Error(`CAD kernel exceeded the ${this.timeoutMs / 1000}-second processing limit; the operation was stopped`)).catch(() => {});
       }, this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try { worker.postMessage({ id, method, args }); }
@@ -60,29 +54,34 @@ export class KernelWorkerClient {
   }
 
   call<T>(method: string, args: unknown[]): Promise<T> {
+    const generation = this.generation;
     const run = async () => {
+      await this.stopping;
+      if (generation !== this.generation) throw Error("CAD kernel request was cancelled");
       try { return await this.once<T>(method, args); }
       catch (error) {
-        // These are WASM/Embind lifetime failures, not invalid user geometry.
-        // Rebuild once in a fresh worker, preserving normal validation errors.
-        if (!(error instanceof Error) || !/Expected null or instance of .*got an instance of|memory access out of bounds|null function or function signature mismatch/i.test(error.message)) throw error;
-        await this.close();
-        return this.once<T>(method, args);
-      }
+        // Retire a damaged native heap. Do not replay an operation or hide its
+        // original failure; only a later explicit request starts a new worker.
+        if (error instanceof Error && /Expected null or instance of .*got an instance of|memory access out of bounds|null function or function signature mismatch/i.test(error.message))
+          await this.close(error);
+        throw error;
+      } finally { await this.stopping; }
     };
     const result = this.chain.then(run, run);
-    this.chain = result.catch(() => {});
+    this.chain = result.then(() => {}, () => {});
     return result;
   }
 
-  async close() {
+  async close(reason = Error("CAD kernel stopped")) {
+    this.generation++;
     const worker = this.worker;
     this.worker = undefined;
     for (const p of this.pending.values()) {
       clearTimeout(p.timer);
-      p.reject(Error("CAD kernel stopped"));
+      p.reject(reason);
     }
     this.pending.clear();
-    await worker?.terminate();
+    if (worker) this.stopping = worker.terminate();
+    await this.stopping;
   }
 }
