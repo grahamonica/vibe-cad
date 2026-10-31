@@ -363,6 +363,7 @@ input[type="range"] {
 .viewport-host {
   position: absolute;
   inset: 0;
+  isolation: isolate;
   outline: none;
 }
 .viewport-host canvas {

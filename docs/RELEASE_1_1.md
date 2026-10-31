@@ -4,7 +4,7 @@
 
 Native activation exposed a separate viewport allocation failure after delivery succeeded. Display decoding now retains float32/uint32 buffers and shares them with GPU attributes. Metal textures preserve indexed triangles, splitting vertices only at projection seams. Curved silhouettes reference mesh endpoints and reuse their camera-update buffers. Memory checks count shared CPU backing stores and actual upload attributes under the unchanged 128 MiB limit. CAD solids, topology and export precision remain unchanged.
 
-The actual 86-body assembly prepares about 93 MiB of geometry buffers at three camera angles, retaining every triangle position, normal and face group. Ten focused existing checks pass. This is preparation/allocation evidence; native rendering and live motion still require verification after activation.
+The actual 86-body assembly prepares about 93 MiB of geometry buffers at three camera angles, retaining every triangle position, normal and face group. Viewport status layers stay inside the canvas stacking context, keeping the separate Close and Reload controls accessible. Ten focused existing checks pass. This is preparation/allocation evidence; native rendering and live motion still require verification after activation.
 
 ## 1.1.12 execution and resource ownership audit
 
