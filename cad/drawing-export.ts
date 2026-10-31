@@ -405,6 +405,10 @@ export function profileDXF(
   const g = (code: number, value: string | number) => out.push(String(code), typeof value === "number" ? fine(value) : value);
   g(0, "SECTION");
   g(2, "HEADER");
+  // Use one consistent legacy dialect. LWPOLYLINE is not valid R12 geometry;
+  // strict CAD readers rejected the previous mixed-version curved outlines.
+  g(9, "$ACADVER");
+  g(1, "AC1009");
   g(9, "$INSUNITS");
   g(70, units === "in" ? 1 : 4);
   g(9, "$MEASUREMENT");
@@ -443,14 +447,22 @@ export function profileDXF(
         g(51, e.end);
       }
     } else {
-      g(0, "LWPOLYLINE");
+      g(0, "POLYLINE");
       g(8, "CUT");
-      g(90, e.points.length);
+      g(66, 1);
+      g(10, 0);
+      g(20, 0);
+      g(30, 0);
       g(70, 0);
       for (const p of e.points) {
+        g(0, "VERTEX");
+        g(8, "CUT");
         g(10, p[0] * k);
         g(20, p[1] * k);
+        g(30, 0);
       }
+      g(0, "SEQEND");
+      g(8, "CUT");
     }
   }
   g(0, "ENDSEC");

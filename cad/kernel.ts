@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
 import { topologyKey } from "./topology-key.ts";
 import * as r from "replicad";
+import { NativeScope, curvePoint, edgePoint, edgeTangent, faceNormal, faceSample } from "./native-sampling.ts";
 import { Quaternion, Vector3 } from "three";
 import { bodyPlacements, direction as placedDirection, placeGeometry, point as placedPoint, solveComponents, type SolveReport } from "./assembly.ts";
 import { composeSheet, resolveViews, cameraFor, sheetDimensions, type ViewInput, type ViewCamera } from "./drawing.ts";
@@ -109,10 +110,10 @@ function signature(shape: r.Face | r.Edge, bounds: [Vec3, Vec3]): number[] {
   const isFace = shape instanceof r.Face,
     center = isFace
       ? r.measureShapeSurfaceProperties(shape).centerOfMass
-      : (shape as r.Edge).pointAt(0.5).toTuple();
+      : edgePoint(shape as r.Edge, 0.5);
   const direction = isFace
-    ? shape.normalAt().toTuple()
-    : (shape as r.Edge).tangentAt(0.5).toTuple();
+    ? faceNormal(shape)
+    : edgeTangent(shape as r.Edge, 0.5);
   return [
     ...center.map((v, i) =>
       clean((v - bounds[0][i]) / Math.max(bounds[1][i] - bounds[0][i], 1e-6)),
@@ -120,10 +121,14 @@ function signature(shape: r.Face | r.Edge, bounds: [Vec3, Vec3]): number[] {
     ...direction.map(clean),
   ];
 }
-function circleOf(edge: r.Edge): { center: Vec3; normal: Vec3; radius: number } | undefined {
-  const a = new Vector3(...edge.pointAt(0).toTuple()),
-    b = new Vector3(...edge.pointAt(0.33).toTuple()),
-    c = new Vector3(...edge.pointAt(0.66).toTuple());
+function circleOf(edge: r.Edge, suppliedCurve?: r.Edge['curve']): { center: Vec3; normal: Vec3; radius: number } | undefined {
+  const curve = suppliedCurve ?? edge.curve;
+  let points: Vec3[];
+  try { points = [0, 0.33, 0.66].map(t => curvePoint(curve, t)); }
+  finally { if (!suppliedCurve) curve.delete(); }
+  const a = new Vector3(...points[0]),
+    b = new Vector3(...points[1]),
+    c = new Vector3(...points[2]);
   const u = b.sub(a),
     v = c.sub(a),
     n = u.clone().cross(v);
@@ -148,6 +153,15 @@ interface TopologySet {
   legacy: Map<string, r.Face | r.Edge>;
 }
 const topologyCache = new WeakMap<r.Shape3D, TopologySet>();
+function disposeShape(shape: r.Shape3D) {
+  const cached = topologyCache.get(shape);
+  if (cached) {
+    for (const item of new Set([...cached.objects.values(), ...cached.legacy.values()])) item.delete();
+    topologyCache.delete(shape);
+  }
+  shapeNames.delete(shape);
+  shape.delete();
+}
 /** Persistent face names of a shape, set by the build as each feature completes. */
 const shapeNames = new WeakMap<r.Shape3D, Names>();
 function named<T extends r.Shape3D>(shape: T, names: Names): T {
@@ -189,9 +203,9 @@ function topologies(bodyId: string, shape: r.Shape3D): TopologySet {
       let center =
         kind === "face"
           ? r.measureShapeSurfaceProperties(item as r.Face).centerOfMass
-          : (item as r.Edge).pointAt(0.5).toTuple();
+          : edgePoint(item as r.Edge, 0.5);
       let normal =
-        kind === "face" ? (item as r.Face).normalAt().toTuple() : undefined;
+        kind === "face" ? faceNormal(item as r.Face) : undefined;
       let radius: number | undefined,
         axis: Topology["axis"];
       if (kind === "edge" && item.geomType === "CIRCLE") {
@@ -212,8 +226,7 @@ function topologies(bodyId: string, shape: r.Shape3D): TopologySet {
           if (item.geomType !== "CONE") radius = circle.radius;
           // A hole's wall faces its axis: judged at a point on the face, where its normal is taken.
           const face = item as r.Face,
-            p = face.pointOnSurface(0.5, 0.5).toTuple(),
-            n = face.normalAt(p).toTuple(),
+            { point: p, normal: n } = faceSample(face),
             off = sub(p, circle.center),
             radial = sub(off, mul(unit(circle.normal), dot(off, unit(circle.normal))));
           concave = dot(radial, n) < 0;
@@ -222,8 +235,8 @@ function topologies(bodyId: string, shape: r.Shape3D): TopologySet {
       if (kind === "edge" && item.geomType === "LINE") {
         const e = item as r.Edge;
         axis = {
-          origin: e.pointAt(0).toTuple(),
-          direction: unit(sub(e.pointAt(1).toTuple(), e.pointAt(0).toTuple())),
+          origin: edgePoint(e, 0),
+          direction: unit(sub(edgePoint(e, 1), edgePoint(e, 0))),
         };
       }
       const label =
@@ -261,8 +274,8 @@ function topologies(bodyId: string, shape: r.Shape3D): TopologySet {
           : {
               length: (item as r.Edge).length,
               endpoints: [
-                (item as r.Edge).startPoint.toTuple(),
-                (item as r.Edge).endPoint.toTuple(),
+                edgePoint(item as r.Edge, 0),
+                edgePoint(item as r.Edge, 1),
               ] as [Vec3, Vec3],
             }),
       });
@@ -311,7 +324,7 @@ function principalFrame(name: "XY" | "XZ" | "YZ", origin: Vec3 = [0, 0, 0]): Fra
 /** Sketch axes for an arbitrary normal: horizontal faces keep +X; others keep +Z up. */
 function faceFrame(face: r.Face, mode: "origin" | "face-center"): Frame {
   if (face.geomType !== "PLANE") throw Error("Select a planar face");
-  const normal = face.normalAt().toTuple(),
+  const normal = faceNormal(face),
     center = r.measureShapeSurfaceProperties(face).centerOfMass;
   if (mode === "face-center") {
     // Legacy placement retained for documents created before origin-projected face sketches.
@@ -382,7 +395,7 @@ class Build {
   constructor(readonly doc: Document) {}
   own(id: string, shape: r.Shape3D) {
     const previous = this.shapes.get(id);
-    if (previous && previous !== shape) previous.delete();
+    if (previous && previous !== shape) disposeShape(previous);
     this.shapes.set(id, shape);
   }
   body(id: string, feature: Feature) {
@@ -605,13 +618,15 @@ class Build {
 
 // ---------------------------------------------------------------------------
 // Sketch profiles
-function loopDrawing(loop: Loop): r.Drawing {
+function loopDrawing(loop: Loop): r.Blueprint {
   const pieces: Piece[] = [];
   for (const p of loop.pieces) {
     // A closed arc cannot be drawn through three points; split it in half.
     if (p.kind === "arc" && Math.abs(Math.abs(p.sweep) - TAU) < 1e-9) {
       if (loop.pieces.length === 1)
-        return r.drawCircle(p.radius).translate(p.center[0], p.center[1]);
+        return new r.BlueprintSketcher([p.center[0] - p.radius, p.center[1]])
+          .sagittaArc(2 * p.radius, 0, p.radius)
+          .sagittaArc(-2 * p.radius, 0, p.radius).close();
       const mid = piecePoint(p, 0.5);
       pieces.push(
         { ...p, sweep: p.sweep / 2, b: mid },
@@ -620,7 +635,7 @@ function loopDrawing(loop: Loop): r.Drawing {
     } else pieces.push(p);
   }
   const start = pieces[0].a;
-  let pen = r.draw(start);
+  let pen = new r.BlueprintSketcher(start);
   pieces.forEach((p, i) => {
     // The final piece ends exactly on the first point so the wire closes.
     const last = i === pieces.length - 1,
@@ -632,10 +647,34 @@ function loopDrawing(loop: Loop): r.Drawing {
   });
   return pen.close();
 }
-function regionDrawing(region: Region): r.Drawing {
-  let drawing = loopDrawing(region.outer);
-  for (const hole of region.holes) drawing = drawing.cut(loopDrawing(hole));
-  return drawing;
+function regionFace(region: Region, plane: r.Plane): r.Face {
+  // Region classification has already found the outer loop and its holes.
+  // Re-subtracting every hole in 2D repeatedly cloned/intersected the whole
+  // drawing, and CompoundSketch.extrude does not dispose its input profiles.
+  // Build the known wires once and explicitly own their native lifetimes.
+  const sketches: r.Sketch[] = [];
+  let face: r.Face | undefined;
+  try {
+    for (const loop of [region.outer, ...region.holes]) {
+      const drawing = loopDrawing(loop);
+      let sketch: r.Sketch;
+      try { sketch = drawing.sketchOnPlane(plane); }
+      finally { drawing.delete(); }
+      sketches.push(sketch);
+    }
+    face = r.makeFace(sketches[0].wire);
+    if (sketches.length > 1) {
+      const holed = r.addHolesInFace(face, sketches.slice(1).map(s => s.wire));
+      face.delete();
+      face = holed;
+    }
+    const result = face;
+    face = undefined;
+    return result;
+  } finally {
+    face?.delete();
+    sketches.forEach(sketch => sketch.delete());
+  }
 }
 function profileRegions(s: Sketch, seeds?: Vec2[]): Region[] {
   const regions = selectRegions(sketchRegions(s), seeds);
@@ -659,12 +698,15 @@ function singleProfile(s: Sketch, plane: r.Plane): r.Sketch {
   const regions = profileRegions(s);
   if (regions.length !== 1 || regions[0].holes.length)
     throw Error(`${s.name}: select one closed profile without nested or disjoint contours`);
-  const mapped = loopDrawing(regions[0].outer).sketchOnPlane(plane);
+  const drawing = loopDrawing(regions[0].outer);
+  let mapped: r.Sketch;
+  try { mapped = drawing.sketchOnPlane(plane); }
+  finally { drawing.delete(); }
   if (!(mapped instanceof r.Sketch))
     throw Error(`${s.name}: profile must be one closed wire`);
   return mapped;
 }
-function pathDrawing(s: Sketch, reverse: boolean): r.Drawing {
+function pathDrawing(s: Sketch, reverse: boolean): r.Blueprint {
   const es = s.entities.filter((e) => !e.construction && e.type !== "point");
   if (!es.length) throw Error(`${s.name}: sweep path is empty`);
   if (es.length === 1 && ["circle", "rectangle"].includes(es[0].type)) {
@@ -683,7 +725,7 @@ function pathDrawing(s: Sketch, reverse: boolean): r.Drawing {
   if (ends.length !== 0 && ends.length !== 2) throw Error("Sweep path is disconnected");
   const start: [number, number] = ends.length ? ends[reverse ? 1 : 0] : endpoints[reverse ? 1 : 0];
   let cursor = start,
-    pen = r.draw(start);
+    pen = new r.BlueprintSketcher(start);
   const pending = es.map((e) => structuredClone(e));
   while (pending.length) {
     let index = pending.findIndex((e) => close(endsOf(e)[0], cursor));
@@ -772,7 +814,7 @@ function extrudeTool(ctx: Build, f: Feature): r.Shape3D {
     if (!p.upTo) throw Error(`${f.name}: select the face to extrude up to`);
     const face = ctx.findFace(p.upTo);
     if (face.geomType !== "PLANE") throw Error(`${f.name}: up-to face must be planar`);
-    const n = unit(face.normalAt().toTuple()),
+    const n = unit(faceNormal(face)),
       c = r.measureShapeSurfaceProperties(face).centerOfMass,
       along = dot(dir, n);
     if (Math.abs(Math.abs(along) - 1) < 1e-9) {
@@ -787,12 +829,12 @@ function extrudeTool(ctx: Build, f: Feature): r.Shape3D {
   let solid: r.Shape3D;
   try {
     solid = fuseAll(
-      regions.map((region) =>
-        (regionDrawing(region).sketchOnPlane(plane) as r.Sketch).extrude(
-          forward + backward,
-          { extrusionDirection: dir },
-        ),
-      ),
+      regions.map((region) => {
+        const face = regionFace(region, plane);
+        const vector = new r.Vector(mul(unit(dir), forward + backward));
+        try { return r.basicFaceExtrusion(face, vector); }
+        finally { vector.delete(); face.delete(); }
+      }),
     );
   } finally {
     plane.delete();
@@ -811,7 +853,7 @@ function extrudeTool(ctx: Build, f: Feature): r.Shape3D {
   }
   if (p.draftAngle) {
     const lateral = solid.faces.filter(
-      (face) => face.geomType !== "PLANE" || Math.abs(dot(unit(face.normalAt().toTuple()), dir)) < 0.999,
+      (face) => face.geomType !== "PLANE" || Math.abs(dot(unit(faceNormal(face)), dir)) < 0.999,
     );
     const neutral = new r.Plane(add(frame.origin, mul(dir, -backward)), frame.xDir, dir);
     try {
@@ -840,11 +882,11 @@ function revolveTool(ctx: Build, f: Feature): r.Shape3D {
   let solid: r.Shape3D;
   try {
     solid = fuseAll(
-      regions.map((region) =>
-        (regionDrawing(region).sketchOnPlane(plane) as r.Sketch)
-          .revolve(axis.direction, { origin: axis.origin, angle })
-          .asShape3D(),
-      ),
+      regions.map((region) => {
+        const face = regionFace(region, plane);
+        try { return r.revolution(face, axis.origin, axis.direction, angle).asShape3D(); }
+        finally { face.delete(); }
+      }),
     );
   } finally {
     plane.delete();
@@ -895,7 +937,10 @@ function sweepTool(ctx: Build, f: Feature): r.Shape3D {
     builder: any;
   try {
     profile = singleProfile(profileDoc, profilePlane);
-    const mapped = pathDrawing(pathDoc, !!p.reversePath).sketchOnPlane(pathPlane);
+    const drawing = pathDrawing(pathDoc, !!p.reversePath);
+    let mapped: r.Sketch;
+    try { mapped = drawing.sketchOnPlane(pathPlane); }
+    finally { drawing.delete(); }
     if (!(mapped instanceof r.Sketch)) throw Error("Sweep path must be one wire");
     path = mapped;
     const tangent = path.wire.tangentAt(1e-9),
@@ -1082,14 +1127,14 @@ function flangeTool(ctx: Build, f: Feature, body: r.Shape3D): r.Shape3D {
   // Of the two faces at the edge, the side face is the sheet's thickness (T
   // across, square to the other): on the base outline or at the end of a flange.
   const span = length(sub(B, A));
-  const square = (a: r.Face, b: r.Face) => Math.abs(dot(unit(a.normalAt().toTuple()), unit(b.normalAt().toTuple()))) < 1e-6;
+  const square = (a: r.Face, b: r.Face) => Math.abs(dot(unit(faceNormal(a)), unit(faceNormal(b)))) < 1e-6;
   // On the base outline the sheet face lies flat like the base flange; at a
   // flange's end, the side face is the one exactly T across.
   // Merged faces (a base end that took flange caps) are no longer T across, so
   // the base-plane rule decides when the thickness test cannot.
   const across = (face: r.Face) => r.measureArea(face) / span;
   const thin = faces.filter((face) => Math.abs(across(face) - T) < 1e-6 * Math.max(1, T) && faces.some((o) => o !== face && square(o, face)));
-  const flat = faces.find((face) => Math.abs(Math.abs(dot(unit(face.normalAt().toTuple()), sheet.normal)) - 1) < 1e-6);
+  const flat = faces.find((face) => Math.abs(Math.abs(dot(unit(faceNormal(face)), sheet.normal)) - 1) < 1e-6);
   const side = thin.length === 1 ? thin[0] : flat ? faces.find((face) => face !== flat && square(face, flat)) : undefined;
   const top = side && faces.find((face) => face !== side && square(face, side));
   if (!side || !top) throw Error("pick an edge along the sheet's outline, where a sheet face meets the thickness");
@@ -1098,8 +1143,8 @@ function flangeTool(ctx: Build, f: Feature, body: r.Shape3D): r.Shape3D {
     parent = ctx.flanges.has(owner) ? owner : undefined;
   const center = (face: r.Face) => r.measureShapeSurfaceProperties(face).centerOfMass;
   // Face normals of a solid point out of the material.
-  const m = unit(side.normalAt().toTuple()),
-    n = unit(top.normalAt().toTuple());
+  const m = unit(faceNormal(side)),
+    n = unit(faceNormal(top));
   // Bending "up" turns toward n, keeping the edge's own face inside the bend.
   const up = p.flip ? mul(n, -1) : n;
   const s = flangeSection(T, R, angle, p.length);
@@ -1137,7 +1182,7 @@ function flangeTool(ctx: Build, f: Feature, body: r.Shape3D): r.Shape3D {
       else if (Math.abs(along - span) < 1e-6 * span) role = "cap-end";
       else if (Math.abs(local[0]) < 1e-6 && local[1] <= T + 1e-6) role = "root";
       else {
-        const nn = unit(face.normalAt().toTuple()),
+        const nn = unit(faceNormal(face)),
           wn: Vec3 = add(mul(m, w[0]), mul(up, w[1]));
         // The wall faces lie on lines through the bend ends along w.
         const off = (q: Vec2) => Math.abs(w[0] * (local[1] - q[1]) - w[1] * (local[0] - q[0]));
@@ -1310,7 +1355,7 @@ function moveFaceShape(body: r.Shape3D, faces: r.Face[], offset: number, feature
   for (const g of body.faces) for (const e of g.edges) around.set(e.hashCode, [...(around.get(e.hashCode) ?? []), g]);
   const prisms = faces.map((face, k) => {
     if (face.geomType !== "PLANE") throw Error("Move Face offsets planar faces");
-    const n = unit(face.normalAt().toTuple()),
+    const n = unit(faceNormal(face)),
       center = r.measureShapeSurfaceProperties(face).centerOfMass;
     for (const edge of face.edges) {
       const neighbor = (around.get(edge.hashCode) ?? []).find((g) => !g.isSame(face) && g.edges.some((e) => e.isSame(edge)));
@@ -1325,7 +1370,7 @@ function moveFaceShape(body: r.Shape3D, faces: r.Face[], offset: number, feature
     const base = names.get(face.hashCode) ?? `${featureId}:face${k}`,
       out: Names = new Map();
     prism.faces.forEach((g, i) => {
-      const cap = g.geomType === "PLANE" && Math.abs(Math.abs(dot(unit(g.normalAt().toTuple()), n)) - 1) < 1e-9;
+      const cap = g.geomType === "PLANE" && Math.abs(Math.abs(dot(unit(faceNormal(g)), n)) - 1) < 1e-9;
       const far = cap && Math.abs(dot(sub(r.measureShapeSurfaceProperties(g).centerOfMass, center), n)) > Math.abs(offset) / 2;
       out.set(g.hashCode, far ? base : cap ? `${featureId}:${k}:start` : `${featureId}:${k}:side${i}`);
     });
@@ -1562,7 +1607,7 @@ function weldBeads(body: r.Shape3D, edges: r.Edge[], leg: number, featureId: str
       mid = mul(add(A, B), 0.5);
     // In each face: the direction square to the edge, pointing into the face.
     const [d1, d2] = faces.map((face) => {
-      const n = unit(face.normalAt().toTuple()),
+      const n = unit(faceNormal(face)),
         d = unit(cross(n, e)),
         c = r.measureShapeSurfaceProperties(face).centerOfMass;
       return dot(sub(c, mid), d) >= 0 ? d : mul(d, -1);
@@ -1693,29 +1738,32 @@ function seamEdges(shape: r.Shape3D, topology?: ReturnType<typeof topologies>): 
  * the viewer turns tangent edges off.
  */
 function tangentEdgeIds(shape: r.Shape3D, topology: ReturnType<typeof topologies>, hidden: Set<number>): string[] {
-  const faces = new Map<number, r.Face[]>();
-  for (const face of shape.faces)
-    for (const e of face.edges) {
-      const list = faces.get(e.hashCode) ?? [];
-      if (!list.some((f) => f.isSame(face))) list.push(face);
-      faces.set(e.hashCode, list);
+  const scope = new NativeScope();
+  try {
+    const faces = new Map<number, r.Face[]>();
+    for (const face of scope.all(shape.faces))
+      for (const e of scope.all(face.edges)) {
+        const list = faces.get(e.hashCode) ?? [];
+        if (!list.some((f) => f.isSame(face))) list.push(face);
+        faces.set(e.hashCode, list);
+      }
+    const out: string[] = [];
+    for (const edge of scope.all(shape.edges)) {
+      const pair = faces.get(edge.hashCode);
+      if (hidden.has(edge.hashCode) || pair?.length !== 2) continue;
+      try {
+        // The edge already has a parametric curve on each adjacent face. A 3D
+        // nearest-point projection here is redundant, especially expensive on
+        // spline surfaces, and leaves large native temporaries waiting for JS GC.
+        const [n1, n2] = pair.map((face) => boundaryNormal(face, edge));
+        const id = topology.hashes.get(edge.hashCode);
+        if (id && dot(n1, n2) > Math.cos(Math.PI / 180)) out.push(id);
+      } catch {
+        /* a degenerate edge: leave it drawn */
+      }
     }
-  const out: string[] = [];
-  for (const edge of shape.edges) {
-    const pair = faces.get(edge.hashCode);
-    if (hidden.has(edge.hashCode) || pair?.length !== 2) continue;
-    try {
-      // The edge already has a parametric curve on each adjacent face. A 3D
-      // nearest-point projection here is redundant, especially expensive on
-      // spline surfaces, and leaves large native temporaries waiting for JS GC.
-      const [n1, n2] = pair.map((face) => boundaryNormal(face, edge));
-      const id = topology.hashes.get(edge.hashCode);
-      if (id && dot(n1, n2) > Math.cos(Math.PI / 180)) out.push(id);
-    } catch {
-      /* a degenerate edge: leave it drawn */
-    }
-  }
-  return out;
+    return out;
+  } finally { scope.dispose(); }
 }
 function boundaryNormal(face: r.Face, edge: r.Edge): Vec3 {
   const oc = r.getOC() as any;
@@ -1737,33 +1785,36 @@ function boundaryNormal(face: r.Face, edge: r.Edge): Vec3 {
  * part there, so, like seams, they are not drawn.
  */
 function sameSurfaceEdges(shape: r.Shape3D, topology: ReturnType<typeof topologies>): Set<number> {
-  const meta = new Map(topology.metadata.map((t) => [t.id, t]));
-  const sides = new Map<number, Topology[]>();
-  for (const face of shape.faces) {
-    const t = meta.get(topology.hashes.get(face.hashCode) ?? "");
-    if (!t) continue;
-    for (const e of face.edges) {
-      const list = sides.get(e.hashCode) ?? [];
-      if (!list.includes(t)) list.push(t);
-      sides.set(e.hashCode, list);
+  const scope = new NativeScope();
+  try {
+    const meta = new Map(topology.metadata.map((t) => [t.id, t]));
+    const sides = new Map<number, Topology[]>();
+    for (const face of scope.all(shape.faces)) {
+      const t = meta.get(topology.hashes.get(face.hashCode) ?? "");
+      if (!t) continue;
+      for (const e of scope.all(face.edges)) {
+        const list = sides.get(e.hashCode) ?? [];
+        if (!list.includes(t)) list.push(t);
+        sides.set(e.hashCode, list);
+      }
     }
-  }
-  const tol = 1e-6;
-  const same = (a: Topology, b: Topology) => {
-    if (a.geomType !== b.geomType) return false;
-    if (a.geomType === "PLANE")
-      return !!a.normal && !!b.normal && Math.abs(Math.abs(dot(unit(a.normal), unit(b.normal))) - 1) < 1e-9 && Math.abs(dot(sub(a.center, b.center), unit(a.normal))) < tol;
-    if ((a.geomType === "CYLINDRE" || a.geomType === "SPHERE") && a.axis && b.axis && a.radius !== undefined && b.radius !== undefined) {
-      const u = unit(a.axis.direction),
-        off = sub(b.axis.origin, a.axis.origin);
-      const onAxis = a.geomType === "SPHERE" ? length(off) < tol : length(sub(off, mul(u, dot(off, u)))) < tol;
-      return Math.abs(Math.abs(dot(u, unit(b.axis.direction))) - 1) < 1e-9 && onAxis && Math.abs(a.radius - b.radius) < tol;
-    }
-    return false;
-  };
-  const out = new Set<number>();
-  for (const [hash, list] of sides) if (list.length === 2 && same(list[0], list[1])) out.add(hash);
-  return out;
+    const tol = 1e-6;
+    const same = (a: Topology, b: Topology) => {
+      if (a.geomType !== b.geomType) return false;
+      if (a.geomType === "PLANE")
+        return !!a.normal && !!b.normal && Math.abs(Math.abs(dot(unit(a.normal), unit(b.normal))) - 1) < 1e-9 && Math.abs(dot(sub(a.center, b.center), unit(a.normal))) < tol;
+      if ((a.geomType === "CYLINDRE" || a.geomType === "SPHERE") && a.axis && b.axis && a.radius !== undefined && b.radius !== undefined) {
+        const u = unit(a.axis.direction),
+          off = sub(b.axis.origin, a.axis.origin);
+        const onAxis = a.geomType === "SPHERE" ? length(off) < tol : length(sub(off, mul(u, dot(off, u)))) < tol;
+        return Math.abs(Math.abs(dot(u, unit(b.axis.direction))) - 1) < 1e-9 && onAxis && Math.abs(a.radius - b.radius) < tol;
+      }
+      return false;
+    };
+    const out = new Set<number>();
+    for (const [hash, list] of sides) if (list.length === 2 && same(list[0], list[1])) out.add(hash);
+    return out;
+  } finally { scope.dispose(); }
 }
 
 /** Parsed imported files by content hash, most recently used last. */
@@ -2404,7 +2455,7 @@ export async function buildModel(doc: Document): Promise<Build> {
     return ctx;
   } catch (error) {
     ctx.dispose();
-    for (const s of ctx.shapes.values()) s.delete();
+    for (const s of ctx.shapes.values()) disposeShape(s);
     throw error;
   }
 }
@@ -2577,7 +2628,7 @@ export async function rebuild(doc: Document): Promise<Geometry> {
     if (Object.keys(ctx.sketchUpdates).length) geometry.sketchUpdates = ctx.sketchUpdates;
     return geometry;
   } finally {
-    for (const s of shapes.values()) s.delete();
+    for (const s of shapes.values()) disposeShape(s);
   }
 }
 /**
@@ -2619,7 +2670,7 @@ export async function projectEdges(doc: Document, sketchId: string, refs: Topolo
     return out;
   } finally {
     ctx.dispose();
-    for (const shape of ctx.shapes.values()) shape.delete();
+    for (const shape of ctx.shapes.values()) disposeShape(shape);
   }
 }
 
@@ -2653,7 +2704,7 @@ async function flatShape(doc: Document, bodyId: string) {
     const height = (q: Vec3) => dot(sub(q, frame.origin), frame.normal);
     // The base face: the largest planar face lying on either sheet face plane.
     const baseFaces = body.faces.filter((face) => {
-      if (face.geomType !== "PLANE" || Math.abs(Math.abs(dot(unit(face.normalAt().toTuple()), frame.normal)) - 1) > 1e-6) return false;
+      if (face.geomType !== "PLANE" || Math.abs(Math.abs(dot(unit(faceNormal(face)), frame.normal)) - 1) > 1e-6) return false;
       const h = height(r.measureShapeSurfaceProperties(face).centerOfMass);
       return Math.abs(h) < 1e-6 || Math.abs(Math.abs(h) - T) < 1e-6;
     });
@@ -2773,7 +2824,7 @@ async function flatShape(doc: Document, bodyId: string) {
   } finally {
     for (const shape of created) shape.delete();
     ctx.dispose();
-    for (const shape of ctx.shapes.values()) shape.delete();
+    for (const shape of ctx.shapes.values()) disposeShape(shape);
   }
 }
 /** Cut edges of an unrolled shape; seams between the base and a flange bound two faces and are not cut. */
@@ -3054,7 +3105,7 @@ export async function exportModel(
       mime: format === "step" ? "application/step" : "model/stl",
     };
   } finally {
-    for (const s of shapes.values()) s.delete();
+    for (const s of shapes.values()) disposeShape(s);
   }
 }
 export type OutlineEntity =
@@ -3076,30 +3127,37 @@ export async function faceOutline(doc: Document, ref: TopologyRef) {
     if (!shape) throw Error("Unknown body");
     const face = resolve(shape, ref);
     if (!(face instanceof r.Face) || face.geomType !== "PLANE") throw Error("Select a planar face to export its outline");
-    const n = unit(face.normalAt().toTuple()),
+    const n = unit(faceNormal(face)),
       { xDir, yDir } = axesFor(n),
       origin = r.measureShapeSurfaceProperties(face).centerOfMass;
     const flat = (p: Vec3): Vec2 => [dot(sub(p, origin), xDir), dot(sub(p, origin), yDir)];
     const entities: OutlineEntity[] = [];
     for (const edge of face.edges) {
-      const a = flat(edge.startPoint.toTuple()),
-        b = flat(edge.endPoint.toTuple());
-      const circle = edge.geomType === "CIRCLE" ? circleOf(edge) : undefined;
-      if (edge.geomType === "LINE") entities.push({ kind: "line", a, b });
-      else if (circle) {
-        const center = flat(circle.center);
-        if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-7) entities.push({ kind: "circle", center, radius: circle.radius });
-        else {
-          const angle = (p: Vec2) => (Math.atan2(p[1] - center[1], p[0] - center[0]) * 180) / Math.PI;
-          const norm = (x: number) => ((x % 360) + 360) % 360;
-          const s = angle(a),
-            e = angle(b),
-            m = angle(flat(edge.pointAt(0.5).toTuple()));
-          // DXF arcs run counter-clockwise; flip the ends when the edge runs the other way.
-          const ccw = norm(m - s) < norm(e - s);
-          entities.push({ kind: "arc", center, radius: circle.radius, start: norm(ccw ? s : e), end: norm(ccw ? e : s) });
-        }
-      } else entities.push({ kind: "polyline", points: Array.from({ length: 65 }, (_, i) => flat(edge.pointAt(i / 64).toTuple())) });
+      // edge.pointAt() constructs a native curve adaptor on EVERY sample.
+      // A detailed plate can have tens of thousands of samples: own one
+      // adaptor per edge and release both points and adaptor synchronously.
+      const curve = edge.curve;
+      try {
+        const point = (t: number) => flat(curvePoint(curve, t));
+        const a = point(0), b = point(1), kind = curve.curveType;
+        const circle = kind === "CIRCLE" ? circleOf(edge, curve) : undefined;
+        if (kind === "LINE") entities.push({ kind: "line", a, b });
+        else if (circle) {
+          const center = flat(circle.center);
+          if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-7) entities.push({ kind: "circle", center, radius: circle.radius });
+          else {
+            const angle = (p: Vec2) => (Math.atan2(p[1] - center[1], p[0] - center[0]) * 180) / Math.PI;
+            const norm = (x: number) => ((x % 360) + 360) % 360;
+            const s = angle(a), e = angle(b), m = angle(point(0.5));
+            // DXF arcs run counter-clockwise; flip the ends when the edge runs the other way.
+            const ccw = norm(m - s) < norm(e - s);
+            entities.push({ kind: "arc", center, radius: circle.radius, start: norm(ccw ? s : e), end: norm(ccw ? e : s) });
+          }
+        } else entities.push({ kind: "polyline", points: Array.from({ length: 65 }, (_, i) => point(i / 64)) });
+      } finally {
+        curve.delete();
+        edge.delete();
+      }
     }
     // Bounds from the curves themselves, so arcs and circles count fully.
     const pts: Vec2[] = entities.flatMap((x) =>
@@ -3124,9 +3182,11 @@ export async function faceOutline(doc: Document, ref: TopologyRef) {
     );
     let thickness: number | undefined;
     for (const other of shape.faces) {
-      if (other.geomType !== "PLANE" || Math.abs(dot(unit(other.normalAt().toTuple()), n) + 1) > 1e-9) continue;
-      const depth = dot(sub(origin, r.measureShapeSurfaceProperties(other).centerOfMass), n);
-      if (depth > 1e-9 && (thickness === undefined || depth < thickness)) thickness = depth;
+      try {
+        if (other.geomType !== "PLANE" || Math.abs(dot(unit(faceNormal(other)), n) + 1) > 1e-9) continue;
+        const depth = dot(sub(origin, r.measureShapeSurfaceProperties(other).centerOfMass), n);
+        if (depth > 1e-9 && (thickness === undefined || depth < thickness)) thickness = depth;
+      } finally { other.delete(); }
     }
     return {
       entities: shifted,
@@ -3135,7 +3195,7 @@ export async function faceOutline(doc: Document, ref: TopologyRef) {
       ...(thickness !== undefined ? { thickness } : {}),
     };
   } finally {
-    for (const s of shapes.values()) s.delete();
+    for (const s of shapes.values()) disposeShape(s);
   }
 }
 export async function measureGeometry(
@@ -3199,7 +3259,7 @@ export async function measureGeometry(
     props.delete();
     return result;
   } finally {
-    for (const s of shapes.values()) s.delete();
+    for (const s of shapes.values()) disposeShape(s);
   }
 }
 /**
@@ -3229,7 +3289,7 @@ export async function interferences(doc: Document, only?: string[], excludeHidde
       }
     return { interferes: pairs.length > 0, pairs: pairs.sort((x, y) => y.volume - x.volume), bodies: ids.length, checked };
   } finally {
-    for (const s of shapes.values()) s.delete();
+    for (const s of shapes.values()) disposeShape(s);
   }
 }
 export async function interference(doc: Document, a: string, b: string) {
@@ -3246,7 +3306,7 @@ export async function interference(doc: Document, a: string, b: string) {
       common.delete();
     }
   } finally {
-    for (const s of shapes.values()) s.delete();
+    for (const s of shapes.values()) disposeShape(s);
   }
 }
 
@@ -3295,7 +3355,7 @@ export async function lineCrossings(doc: Document, lines: { origin: Vec3; direct
       return hits.sort((a, b) => a.enter - b.enter);
     });
   } finally {
-    for (const s of shapes.values()) s.delete();
+    for (const s of shapes.values()) disposeShape(s);
   }
 }
 export async function motionSweep(
@@ -3392,7 +3452,7 @@ export async function motionSweep(
     }
     return sweepSummary(motion.kind, steps);
   } finally {
-    for (const s of shapes.values()) s.delete();
+    for (const s of shapes.values()) disposeShape(s);
   }
 }
 type SweepStep = { value: number; clearance: number; closest: string; interference: { with: string; volume: number; by?: string }[] };
@@ -3535,7 +3595,7 @@ export async function mechanismSweep(
     if (!steps.length) throw Error(limit?.reason ?? "The mechanism cannot start");
     return sweepSummary(motion.kind, steps, limit);
   } finally {
-    for (const s of shapes.values()) s.delete();
+    for (const s of shapes.values()) disposeShape(s);
   }
 }
 function transformShape<T extends r.Shape<any>>(shape: T, p: Placement): T {
@@ -3603,7 +3663,7 @@ async function placedModel(doc: Document) {
     }
     return { shapes, metadata, components };
   } catch (e) {
-    for (const shape of shapes.values()) shape.delete();
+    for (const shape of shapes.values()) disposeShape(shape);
     throw e;
   }
 }
@@ -3760,7 +3820,7 @@ export async function renderDrawing(doc: Document, drawingId: string, format: "s
             for (const s of kept)
               for (const face of s.faces) {
                 if (face.geomType !== "PLANE") continue;
-                const fn = face.normalAt().toTuple(),
+                const fn = faceNormal(face),
                   fc = r.measureShapeSurfaceProperties(face).centerOfMass;
                 if (Math.abs(Math.abs(dot(fn, cut.normal)) - 1) > 1e-6 || Math.abs(dot(sub(fc, cut.origin), cut.normal)) > 1e-5) continue;
                 for (const edge of face.edges) {
@@ -3805,6 +3865,6 @@ export async function renderDrawing(doc: Document, drawingId: string, format: "s
     };
   } finally {
     for (const s of created) s.delete();
-    for (const s of shapes.values()) s.delete();
+    for (const s of shapes.values()) disposeShape(s);
   }
 }

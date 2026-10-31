@@ -1,5 +1,13 @@
 # Vibe CAD 1.1
 
+## 1.1.8 native geometry ownership and cutting-file compatibility
+
+Known profile holes now become face wires directly, instead of repeatedly subtracting them in 2D. Profile sketches, 2D curves, topology caches, naming traversals and tangent-edge traversals explicitly release the native objects they own. Curve sampling owns one adaptor per edge and releases each OCCT point; face-normal sampling releases its evaluator immediately. These changes address concrete deferred native allocations without adding retries, forced garbage collection, dependencies or background benchmarks.
+
+Cutting outlines use DXF R12 entities consistently, including classic POLYLINE/VERTEX records for sampled curves. This fixes the legacy-header/LWPOLYLINE mismatch rejected by strict readers.
+
+Validation uses existing plate/reference-persistence, fillet/rollback and revolve checks, the existing drawing/export checks, independent ezdxf parsing, and an in-memory rebuild/export of the real detailed forest followed by the speaker flange. The earlier long-session arithmetic trap was not reproduced in the isolated replay; these checks do not certify native editor crash freedom. Activate the installed update with an app restart and verify the running version before editing saved models. No private CAD files or new test suite are shipped.
+
 ## 1.1.5 spline boundary evaluation
 
 The detailed forest/tab failure was reproduced on the same Node 24.19.0 runtime as the live plugin, after loading the saved 47-document assembly. The joined solid and its meshes completed. Tangent-edge classification then exhausted the WebAssembly heap at 4,294,901,760 bytes; the kernel abort surfaced as a stack overflow. Rollback attempted to reuse that state and its null-shape/WebAssembly error replaced the original failure. Isolated forest-only replays did not expose this memory threshold.
