@@ -6,6 +6,8 @@ import { execFileSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import assert from "node:assert/strict";
+const packageVersion = JSON.parse(await readFile(resolve("package.json"), "utf8")).version;
+const uiUri = `ui://vibe-cad/editor-${packageVersion}.html`;
 const temp = await mkdtemp(join(tmpdir(), "vibe-standalone-"));
 const archive = resolve("dist/vibe-cad-local.zip");
 const entries = execFileSync("unzip", ["-Z1", archive], {
@@ -42,6 +44,9 @@ const client = new Client({
 transport.stderr?.on("data", () => {});
 try {
   await client.connect(transport);
+  const engine = await client.callTool({name:"engine_info",arguments:{}});
+  assert.equal(engine.structuredContent.version, packageVersion, "Engine must report the bundled package version");
+  assert.equal(client.getServerVersion()?.version, packageVersion);
   const catalog = (await client.listTools()).tools;
   assert.ok(catalog.length >= 100);
   const visibleTools = catalog.filter(t => t._meta?.ui?.visibility?.includes("model"));
@@ -49,10 +54,10 @@ try {
   for (const name of ["create_document", "open_cad", "run_steps"]) {
     const tool = catalog.find((x) => x.name === name);
     assert.ok(visibleTools.some(t => t.name === name), `${name} must reach the model`);
-    assert.equal(tool._meta.ui.resourceUri, name === "open_cad" ? "ui://vibe-cad/editor-1.1.8.html" : undefined);
+    assert.equal(tool._meta.ui.resourceUri, name === "open_cad" ? uiUri : undefined);
     assert.equal(
       tool._meta["openai/outputTemplate"],
-      name === "open_cad" ? "ui://vibe-cad/editor-1.1.8.html" : undefined,
+      name === "open_cad" ? uiUri : undefined,
     );
   }
   // Reproduce a plugin update removing an old installation while its stdio
@@ -110,7 +115,7 @@ try {
       .toString()
       .startsWith("ISO-10303-21;"),
   );
-  const ui = await client.readResource({ uri: "ui://vibe-cad/editor-1.1.8.html" });
+  const ui = await client.readResource({ uri: uiUri });
   assert.equal(ui.contents[0].mimeType, "text/html;profile=mcp-app");
   assert.ok(ui.contents[0].text.includes("3D CAD viewport"));
   const report = {

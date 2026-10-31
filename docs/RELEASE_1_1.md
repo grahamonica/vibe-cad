@@ -2,6 +2,8 @@
 
 ## 1.1.8 native geometry ownership and cutting-file compatibility
 
+Engine info, server metadata, editor identity and resource URI derive from the bundled package version. This removes a stale hardcoded engine-info version that could misidentify an activated installation; standalone verification checks their agreement.
+
 Known profile holes now become face wires directly, instead of repeatedly subtracting them in 2D. Profile sketches, 2D curves, topology caches, naming traversals and tangent-edge traversals explicitly release the native objects they own. Curve sampling owns one adaptor per edge and releases each OCCT point; face-normal sampling releases its evaluator immediately. These changes address concrete deferred native allocations without adding retries, forced garbage collection, dependencies or background benchmarks.
 
 Cutting outlines use DXF R12 entities consistently, including classic POLYLINE/VERTEX records for sampled curves. This fixes the legacy-header/LWPOLYLINE mismatch rejected by strict readers.

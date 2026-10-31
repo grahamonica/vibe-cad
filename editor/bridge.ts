@@ -1,3 +1,4 @@
+import { CAD_VERSION } from "../cad/version.ts";
 import type { View } from "../cad/types.ts";
 import { App } from "@modelcontextprotocol/ext-apps";
 import { receiveView } from "./view-stream.ts";
@@ -65,7 +66,7 @@ export async function reloadEditor(discardUnsaved=false){if(discardUnsaved){draf
 export async function initialize() {
   if (ready) return ready;
   app = new App(
-    { name: "Vibe CAD", version: "1.1.8" },
+    { name: "Vibe CAD", version: CAD_VERSION },
     { availableDisplayModes: ["inline", "fullscreen"] },
     { autoResize: false },
   );

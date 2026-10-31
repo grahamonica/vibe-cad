@@ -1,3 +1,4 @@
+import { CAD_VERSION } from "../cad/version.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   registerAppResource,
@@ -12,7 +13,7 @@ import { Store } from "../cad/store.ts";
 import type { View } from "../cad/types.ts";
 import { deliverView, registerViewResources } from "./view-delivery.ts";
 import { placementAck } from '../cad/placement.ts';
-export const uiUri = "ui://vibe-cad/editor-1.1.8.html";
+export const uiUri = `ui://vibe-cad/editor-${CAD_VERSION}.html`;
 // Keep the model catalog small enough to survive host catalog budgets. The
 // editor still has every typed operation, and run_steps validates those same
 // schemas. Specialist schemas can be requested without loading all of them.
@@ -26,7 +27,7 @@ export const modelToolNames = new Set([
 ]);
 export function createMcp(store: Store) {
   const server = new McpServer(
-    { name: "vibe-cad", version: "1.1.8" },
+    { name: "vibe-cad", version: CAD_VERSION },
     {
       instructions:
         "Local parametric CAD. Open with open_cad; build with run_steps. Use get_tool_schema for specialist operations. UI and tools share saved documents and revisions. Units: mm. Never invent topology IDs; failed edits preserve the committed model.",
