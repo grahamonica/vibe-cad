@@ -9,7 +9,7 @@ import { BuildInterrupted } from './build-control.ts';
 import { autoExplode, eulerDegrees, gearPhase, localTopology, mateLoops, solveComponents, type SolveReport } from "./assembly.ts";
 import { Euler, Quaternion, Vector3 } from "three";
 import { originFrame } from "./frame.ts";
-import { deflate, git, randomUUID, readText, saveExport, downloadVendorFile } from "./local-io.ts";
+import { deflate, git, randomUUID, readText, saveExport, downloadVendorFile, readLocalCADFile } from "./local-io.ts";
 import { base64, encodePng, renderPicture, type PictureCamera } from "./render-image.ts";
 import { displayStyleIds, displayStyles, textureIds, textureInfo, textures } from "./appearance.ts";
 import type { DocumentStore as Store } from "./document-store.ts";
@@ -2412,10 +2412,13 @@ export function toolset(store: Store) {
       }),
   );
   /** Check an imported file, store it once by content hash, and describe its import feature. */
-  const importFile = async (data: string, format: "step" | "stl" | undefined, filename?: string, units: "mm" | "cm" | "m" | "in" = "mm") => {
-    const binary = atob(data.replace(/\s/g, "")),
+  const importFile = async (data: string | Uint8Array, format: "step" | "stl" | undefined, filename?: string, units: "mm" | "cm" | "m" | "in" = "mm") => {
+    let bytes: Uint8Array;
+    if (typeof data === "string") {
+      const binary = atob(data.replace(/\s/g, ""));
       bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    } else bytes = data;
     const isStep = new TextDecoder().decode(bytes.subarray(0, 80)).includes("ISO-10303-21"),
       triangles = isStep ? 0 : stlTriangleCount(bytes);
     const kind = format ?? (isStep ? "step" : triangles ? "stl" : undefined);
@@ -2476,9 +2479,10 @@ export function toolset(store: Store) {
   add(
     "import_part",
     "Import file as part",
-    "Create a new part document from base64 STEP/STL bytes, ready to insert into assemblies. For internet/vendor CAD use import_vendor_part with the direct HTTPS file URL instead of generating or pasting base64. The part is saved only after valid solid import; editable with sketches, cuts, holes, fillets and patterns.",
+    "Create a reusable part from a local STEP/STL file (localPath, up to 32 MiB) or supplied base64 data. Prefer localPath for a prepared file; never transfer large CAD files through chat. Give exactly one of localPath or data. For public vendor URLs use import_vendor_part. The part is saved only after valid solid import.",
     {
-      data: fileData.describe("STEP or STL file contents, base64"),
+      data: fileData.optional().describe("Supplied STEP/STL contents, base64; omit with localPath"),
+      localPath: z.string().min(1).max(4096).optional().describe("Absolute path to an authorized local STEP/STP/STL file; avoids base64 transport"),
       filename: z.string().max(200).optional(),
       name: z.string().min(1).max(100).optional().describe("Part document name; defaults to the file name"),
       sourceUrl: z.string().url().max(2048).optional().describe("Source attribution for supplied bytes; does not download a file"),
@@ -2486,7 +2490,10 @@ export function toolset(store: Store) {
     },
     false,
     async (a, s) => {
-      const file = await importFile(a.data, undefined, a.filename, a.units);
+      if ((a.data !== undefined) === (a.localPath !== undefined))
+        throw Error("Give exactly one of localPath or data");
+      const local = a.localPath ? await readLocalCADFile(a.localPath) : undefined;
+      const file = await importFile(local?.bytes ?? a.data!, undefined, a.filename ?? local?.filename, a.units);
       const view = await store.createWith(a.name ?? file.stem, `Imported ${file.label}`, s, (d) => {
         addImport(d, file);
         if (a.sourceUrl) d.features.at(-1)!.params.sourceUrl = a.sourceUrl;

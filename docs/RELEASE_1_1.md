@@ -1,5 +1,11 @@
 # Vibe CAD 1.1
 
+## 1.1.9 bounded file import transport
+
+The import schema allowed 40 MiB of base64, but the stdio SDK default closed the connection above 10 MiB. The transport now uses one explicit 48 MiB budget with complete-line framing. Oversized requests return an error, including when the client places its request ID after the large payload, and the next request still works. Small requests do not reserve a 48 MiB buffer. No retries, worker cycling or new dependencies were added.
+
+`import_part.localPath` reads an explicitly supplied absolute STEP/STP/STL path directly, up to 32 MiB, without encoding the file into the tool request. Exactly one of localPath or data is required. File type and size are checked before bounded reads; native validation and atomic saved-document rules remain in place. Existing STEP-import coverage and one focused stdio regression cover these paths. The previous 1.1.8 editor resource remains readable when a host restores that panel.
+
 ## 1.1.8 native geometry ownership and cutting-file compatibility
 
 Engine info, server metadata, editor identity and resource URI derive from the bundled package version. This removes a stale hardcoded engine-info version that could misidentify an activated installation; standalone verification checks their agreement.

@@ -1,7 +1,28 @@
 export { randomUUID } from "node:crypto";
 export { downloadVendorFile } from "./vendor-file.ts";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { mkdir, writeFile, open } from "node:fs/promises";
+import { join, dirname, isAbsolute, basename } from "node:path";
+/** Only an explicitly supplied CAD file; no folders, commands or network URL. */
+export async function readLocalCADFile(path: string) {
+  if (!isAbsolute(path) || !/\.(step|stp|stl)$/i.test(path))
+    throw Error("localPath must be an absolute path to a STEP, STP or STL file");
+  const file = await open(path, "r");
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.size < 16 || info.size > 32 * 1024 * 1024)
+      throw Error("Local CAD must be a regular file between 16 bytes and 32 MiB");
+    // Bound the read even if another process grows the file after stat().
+    const bytes = Buffer.alloc(info.size + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await file.read(bytes, length, bytes.length - length, null);
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    if (length !== info.size) throw Error("The CAD file changed while it was being read; finish saving it first");
+    return { bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, length), filename: basename(path) };
+  } finally { await file.close(); }
+}
 export async function saveExport(
   directory: string,
   documentId: string,

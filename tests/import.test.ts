@@ -51,6 +51,13 @@ test("STEP import: a vendor solid becomes an editable body, insertable into asse
   const exported = await source.run("export_file", { format: "step" });
   const step = await readFile(exported.path);
 
+  // Local imports preserve the actual geometry without base64 on MCP stdio.
+  const localTool = tools.find(t => t.name === "import_part")!;
+  const local = await localTool.handler(localTool.schema.parse({ localPath: exported.path, name: "Local bracket" }), "assistant") as View;
+  assert.ok(Math.abs(local.geometry.bodies[0].volume - volume) < 1e-6 * volume);
+  await assert.rejects(localTool.handler(localTool.schema.parse({ data: step.toString("base64"), localPath: exported.path }), "assistant"), /exactly one/);
+  await assert.rejects(localTool.handler(localTool.schema.parse({ localPath: join(dir, "not-cad.json") }), "assistant"), /absolute path.*STEP/);
+
   // Import it into another part.
   const part = await open("Imported bracket");
   await assert.rejects(part.run("import_step", { data: Buffer.from("not a step file at all").toString("base64") }), /not a STEP file/);

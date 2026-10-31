@@ -34,7 +34,7 @@ export function createMcp(store: Store) {
     },
   );
   registerViewResources(server, store);
-  for(const resourceUri of [uiUri, "ui://vibe-cad/editor-1.1.2.html", "ui://vibe-cad/editor-1.1.1.html", "ui://vibe-cad/editor-1.1.html", "ui://vibe-cad/editor.html"]) registerAppResource(server, resourceUri===uiUri?"CAD editor":"CAD editor compatibility", resourceUri, {}, async () => ({
+  for(const resourceUri of [uiUri, "ui://vibe-cad/editor-1.1.8.html", "ui://vibe-cad/editor-1.1.2.html", "ui://vibe-cad/editor-1.1.1.html", "ui://vibe-cad/editor-1.1.html", "ui://vibe-cad/editor.html"]) registerAppResource(server, resourceUri===uiUri?"CAD editor":"CAD editor compatibility", resourceUri, {}, async () => ({
     contents: [
       {
         uri: resourceUri,
