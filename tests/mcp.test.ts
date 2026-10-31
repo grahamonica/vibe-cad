@@ -90,6 +90,15 @@ test("MCP handshake, typed tools, annotations, self-contained UI resource, mutat
       assert.equal(ack._meta?.viewChunks,undefined);
       assert.ok(JSON.stringify(ack).length<2000,'Camera and selection must not retransmit the assembly');
     }
+    const observed=(await store.read(id)).viewport!.version!;
+    const external=await client.callTool({name:'set_viewport',arguments:{documentId:id,position:[0,0,400],target:[0,0,0]}});
+    assert.ok(!external.isError);
+    assert.equal((external.structuredContent as any).applied,true);
+    const late=await client.callTool({name:'set_viewport',arguments:{documentId:id,position:[200,0,0],target:[0,0,0],clientId:'editor-a',expectedViewportVersion:observed},_meta:{'vibe-cad/source':'user'}});
+    assert.deepEqual((late.structuredContent as any).document.viewport,(external.structuredContent as any).document.viewport);
+    assert.equal((late.structuredContent as any).applied,false);
+    assert.deepEqual((await store.read(id)).viewport!.position,[0,0,400]);
+    assert.equal((await store.read(id)).revision,0,'Camera conflicts never mutate solid revision');
     const badVector = await client.callTool({
       name: "create_sketch",
       arguments: { documentId: id, expectedRevision: 0, plane: "XY", origin: [0, 0] },
@@ -233,4 +242,28 @@ test("viewport delivery failure does not report a committed edit as a failed CAD
     assert.ok(invalid.isError);
     assert.equal((await store.read(id)).revision, 1);
   } finally { await client.close(); await server.close(); }
+});
+
+test('body inspection pages large imported topology without duplicating its typed payload',async()=>{
+  const count=15956;
+  const topology=Array.from({length:count},(_,i)=>({id:`body:ref:${i}`,bodyId:'body',kind:i===0||i===count-1?'face':'edge',geomType:i===0||i===count-1?'PLANE':'LINE',center:[0,0,0],area:i===0||i===count-1?2000:undefined,label:'Imported topology '.padEnd(400,'x')}));
+  const view={document:{id:'large-part',revision:3},geometry:{bodies:[{id:'body',name:'Imported PCB',volume:1,surfaceArea:2,topology,mesh:{},edges:{},tangentEdges:['body:ref:1','body:ref:200']}]}} as unknown as View;
+  const store=new Store(dir);store.read=async()=>view.document;store.view=async()=>view;
+  const server=createMcp(store),client=new Client({name:'Bounded inspection',version:'1'});
+  const [a,b]=InMemoryTransport.createLinkedPair();await server.connect(a);await client.connect(b);
+  try{
+    const invoke=(args:Record<string,unknown>)=>client.callTool({name:'inspect_geometry',arguments:{documentId:'large-part',bodyId:'body',...args}});
+    const first=await invoke({});assert.ok(!first.isError);
+    const page=first.structuredContent as any;
+    assert.equal(page.topology.length,200);assert.equal(page.topologyPage.total,count);assert.equal(page.topologyPage.nextOffset,200);
+    assert.deepEqual(page.tangentEdges,['body:ref:1']);
+    assert.ok(JSON.stringify(first).length<256*1024,'An imported body must not produce an unbounded response');
+    const content=first.content as Array<{type:string;text:string}>;
+    assert.ok(content[0].text.length<200,'Typed topology must not be repeated as text');
+    const second=(await invoke({offset:200})).structuredContent as any;
+    assert.equal(second.topology[0].id,'body:ref:200');
+    const planes=(await invoke({kind:'face',geomType:'PLANE',minimumArea:1200})).structuredContent as any;
+    assert.deepEqual(planes.topology.map((t:any)=>t.id),['body:ref:0',`body:ref:${count-1}`]);
+    assert.equal(planes.topologyPage.nextOffset,null);
+  }finally{await client.close();await server.close();}
 });

@@ -389,15 +389,31 @@ export function toolset(store: Store) {
   add(
     "inspect_geometry",
     "Inspect CAD topology",
-    "Get faces, edges, stable references, bounding boxes, volume, surface area, and center of mass for a body. Do not invent topology IDs.",
-    { ...base, bodyId: id },
+    "Get body measurements and a page of actual topology references (200 by default). Filter by kind, exact geomType (for example PLANE or CYLINDRE), or minimum face area in mm². Follow topologyPage.nextOffset for more references. No geometry is simplified. Do not invent topology IDs.",
+    {
+      ...base, bodyId: id,
+      kind: z.enum(['face', 'edge']).optional(),
+      geomType: z.string().min(1).max(80).optional(),
+      minimumArea: z.number().finite().min(0).max(1e12).optional(),
+      offset: z.number().int().min(0).default(0),
+      limit: z.number().int().min(1).max(500).default(200),
+    },
     true,
     async (a) => {
       const v = await store.view(await store.read(a.documentId)),
         b = v.geometry.bodies.find((b) => b.id === a.bodyId);
       if (!b) throw Error("Body not found");
-      const { mesh, edges, ...result } = b;
-      return { revision: v.document.revision, ...result };
+      const { mesh, edges, topology, tangentEdges, ...result } = b;
+      const matches = topology.filter(t =>
+        (!a.kind || t.kind === a.kind) && (!a.geomType || t.geomType === a.geomType) &&
+        (a.minimumArea === undefined || t.kind === 'face' && (t.area ?? 0) >= a.minimumArea));
+      const page = matches.slice(a.offset, a.offset + a.limit);
+      const ids = new Set(page.map(t => t.id)), next = a.offset + page.length;
+      return {
+        revision: v.document.revision, ...result, topology: page,
+        tangentEdges: tangentEdges?.filter(id => ids.has(id)),
+        topologyPage: { offset: a.offset, returned: page.length, total: matches.length, nextOffset: next < matches.length ? next : null },
+      };
     },
   );
   add('check_sheet_features','Minimum sheet features',
@@ -476,16 +492,19 @@ export function toolset(store: Store) {
   add(
     "set_viewport",
     "Set viewport camera",
-    "Save camera position and target in the shared document.",
-    { ...base, position: vec3, target: vec3, up: nonzero.optional(), zoom: positive.optional() },
+    "Set the shared camera without rebuilding geometry. Editor writes carry their identity and the camera version they observed, so delayed saves cannot overwrite a newer view command.",
+    {
+      ...base, position: vec3, target: vec3, up: nonzero.optional(), zoom: positive.optional(),
+      clientId: id.optional(), expectedViewportVersion: z.number().int().min(0).optional(),
+    },
     false,
-    async (a) => {
+    async (a, source) => {
       return store.setViewport(a.documentId, {
         position: a.position,
         target: a.target,
         ...(a.up ? { up: a.up } : {}),
         ...(a.zoom ? { zoom: a.zoom } : {}),
-      });
+      }, source === 'user' ? (a.clientId ?? 'user') : 'assistant', a.expectedViewportVersion);
     },
   );
   add(

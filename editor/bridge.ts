@@ -26,6 +26,7 @@ export function onTransfer(fn: (state: ViewTransfer) => void) {
 let resumeState:{documentId:string;sessionId:string}|undefined;
 try{if((performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming)?.type==='reload'){const r=JSON.parse(sessionStorage.getItem('vibe-cad:resume')??'null');if(typeof r?.documentId==='string'&&typeof r?.sessionId==='string')resumeState=r;}sessionStorage.removeItem('vibe-cad:resume');}catch{}
 let editorSessionId=resumeState?.sessionId??globalThis.crypto.randomUUID();
+export const getEditorSessionId=()=>editorSessionId;
 function hostSessionId(){const id=app?.getHostContext()?.toolInfo?.id;return id===undefined?undefined:`tool:${String(id)}`;}
 export function takeResumeDocument(){const id=resumeState?.documentId;resumeState=undefined;return id;}
 let editorDocumentId:string|undefined,registeredDocumentId:string|undefined,editorDirty=false,interactionDirty=false,draftDirty=false,closed=false,registryPending=0;

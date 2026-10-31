@@ -27,7 +27,7 @@ import { SheetFeaturesPanel } from './panels/sheet-features.tsx';
 import { definitionOf } from "../cad/view-summary.ts";
 import { SketchPatternPanel } from "./panels/sketch-pattern.tsx";
 import { DrawingEditor, DrawingProperties, DrawingTree, type DrawingTool, type DrawingSelection } from "./drawing/DrawingEditor.tsx";
-import { download, fullscreen } from "./bridge.ts";
+import { download, fullscreen, getEditorSessionId } from "./bridge.ts";
 import { formatMm } from "./sketch/model.ts";
 import { formatLength, fromDisplay, setUnits, useUnits } from "./units.ts";
 import { evaluate } from "./ui.tsx";
@@ -1288,6 +1288,7 @@ export default function App() {
             <DrawingEditor cad={cad} view={view} sheetId={activeSheet} tool={drawingTool} onTool={setDrawingTool} selection={drawingSelection} onSelect={setDrawingSelection} />
           ) : (
             <Viewport
+              cameraClientId={getEditorSessionId()}
               ref={viewport}
               view={view}
               motion={motionPreview}
@@ -1322,9 +1323,9 @@ export default function App() {
               onDoubleClick={onDoubleClick}
               onCamera={(position, target, up, zoom) => {
                 if (cameraTimer.current) clearTimeout(cameraTimer.current);
+                const pose={position,target,up,zoom,expectedViewportVersion:cad.latest.current?.document.viewport?.version??0};
                 cameraTimer.current = setTimeout(() => {
                   if (cad.latest.current) {
-                    const pose = cad.latest.current.geometry.dependencyKey === undefined ? { position, target } : { position, target, up, zoom };
                     void cad.execute("set_viewport", pose).catch(() => {});
                   }
                 }, 900);

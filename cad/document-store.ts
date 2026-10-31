@@ -523,12 +523,19 @@ export class DocumentStore {
       return view;
     });
   }
-  async setViewport(id: string, viewport: NonNullable<Document['viewport']>) {
+  async setViewport(
+    id: string, viewport: NonNullable<Document['viewport']>,
+    writer = 'assistant', expectedVersion?: number,
+  ) {
     return this.locked(id, async () => {
-      const doc=await this.read(id);
-      doc.viewport=viewport;
-      await this.persistence.commit(doc,doc.revision);
-      return {document:{id:doc.id,revision:doc.revision,selection:doc.selection,viewport:doc.viewport}};
+      const doc = await this.read(id);
+      const version = doc.viewport?.version ?? 0;
+      // A delayed local camera save must not overwrite a newer external view.
+      if (expectedVersion !== undefined && expectedVersion !== version)
+        return { applied: false, document: { id: doc.id, revision: doc.revision, viewport: doc.viewport } };
+      doc.viewport = { ...doc.viewport, ...viewport, version: version + 1, writer };
+      await this.persistence.commit(doc, doc.revision);
+      return { applied: true, document: { id: doc.id, revision: doc.revision, viewport: doc.viewport } };
     });
   }
   async setContext(

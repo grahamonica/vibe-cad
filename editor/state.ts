@@ -1,14 +1,14 @@
 // Document state, serialized command execution and external-change polling.
 import { useEffect, useRef, useState } from "react";
 import type { View } from "../cad/types.ts";
-import { applyContextAck } from './context-ack.ts';
+import { applyContextAck, cameraWriteArgs } from './context-ack.ts';
 import { applyPlacementAck } from '../cad/placement.ts';
 import {
   call,
   context,
   initialize,
   onView,
-  onEditorClosed, editorAlive, closeEditor, closeOtherEditors, setEditorDirty,setInteractionDirty,reloadEditor,takeResumeDocument,
+  onEditorClosed, editorAlive, closeEditor, closeOtherEditors, setEditorDirty,setInteractionDirty,reloadEditor,takeResumeDocument,getEditorSessionId,
   onTransfer,
   type ViewTransfer,
 } from "./bridge.ts";
@@ -102,6 +102,8 @@ export function useCad() {
     )
       return;
     if(!editorAlive())return;
+    if (current?.document.id === v.document.id && (current.document.viewport?.version ?? 0) > (v.document.viewport?.version ?? 0))
+      v = { ...v, document: { ...v.document, viewport: current.document.viewport } };
     latest.current = v;
     setView(v);
     if (!transferRef.current.active) void context(v).catch(() => {});
@@ -156,14 +158,17 @@ export function useCad() {
             pendingRef.current ||
             !['idle','paused'].includes(buildRef.current.state) ||
             !now ||
-            now.document.id !== state.documentId ||
-            (state.revision === now.document.revision &&
-              (state.dependencyKey ?? '') === (now.geometry.dependencyKey ?? '') &&
-              JSON.stringify(state.selection) ===
-                JSON.stringify(now.document.selection) &&
-              state.previewId === (now.preview?.id ?? null))
+            now.document.id !== state.documentId
           )
             return;
+          if (state.revision === now.document.revision &&
+            (state.dependencyKey ?? '') === (now.geometry.dependencyKey ?? '') && state.previewId === (now.preview?.id ?? null)) {
+            const merged = applyContextAck(now, {
+              kind: 'context', document: { id: state.documentId, revision: state.revision, selection: state.selection, viewport: state.viewport },
+            });
+            if (merged !== now) accept(merged);
+            return;
+          }
           const placed=applyPlacementAck(now,state.placement);
           if(placed&&!pendingRef.current){accept(placed);return;}
           const updated = await call<View>("inspect_document", {
@@ -210,6 +215,7 @@ export function useCad() {
     setPending((n) => n + 1);
     const job = queue.current.then(async () => {
       const current = latest.current;
+      const requestArgs=name==='set_viewport'?cameraWriteArgs(current,args,getEditorSessionId()):args;
       const full =
         current && !global.has(name)
           ? {
@@ -217,9 +223,9 @@ export function useCad() {
               ...(unrevised.has(name)
                 ? {}
                 : { expectedRevision: current.document.revision }),
-              ...args,
+              ...requestArgs,
             }
-          : args;
+          : requestArgs;
       try {
         const result = await call<any>(name, full);
         if (result?.document && result?.geometry) accept(result);

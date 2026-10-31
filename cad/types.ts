@@ -483,7 +483,15 @@ export interface Snapshot {
   /** Weight limit in grams (a robot's weight class), checked by mass properties. */
   weightLimit?: number;
   selection: TopologyRef[];
-  viewport?: { position: Vec3; target: Vec3; up?: Vec3; zoom?: number };
+  viewport?: {
+    position: Vec3;
+    target: Vec3;
+    up?: Vec3;
+    zoom?: number;
+    /** Camera metadata advances independently of the solid revision. */
+    version?: number;
+    writer?: string;
+  };
 }
 export interface HistoryEntry {
   id: string;

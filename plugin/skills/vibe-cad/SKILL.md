@@ -15,6 +15,7 @@ Use the installed local `vibe-cad` connection (`mcp__vibe_cad__*`). The former *
 - **Units.** All tools use millimeters and degrees, whatever the editor shows.
 - **Revisions.** Edit tools take `documentId` and `expectedRevision`, the latest revision. An edit made from a stale revision is refused. A failed edit leaves the model unchanged.
 - **Geometry references.** Faces and edges are ids taken from the model, through `inspect_document`, `inspect_geometry` or `inspect_selection` (what the user has selected). Never invent an id. In `run_steps`, pick geometry by description instead.
+- **Large imported parts.** `inspect_geometry` returns 200 references per page. Use `kind`, exact `geomType`, and `minimumArea` filters, or follow `topologyPage.nextOffset` for more. Geometry retains its full detail; a reference page covers only part of it.
 - **Results.** Results are compact summaries. Each one carries `warnings` and a `definition` block: `status` is `full`, `under` or `over`, and `notes` lists what is under-defined and any mate conflicts.
 
 ## Show the interactive editor in chat

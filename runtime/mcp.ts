@@ -108,7 +108,9 @@ export function createMcp(store: Store, deliver = deliverView) {
           const structuredContent = placementOnly
             ? {...placementOnly,document:{...placementOnly.document,units:placementOnly.document.units??'mm'}}
             : contextOnly && view?.document
-            ? {kind:'context',document:{id:view.document.id,revision:view.document.revision,selection:view.document.selection,viewport:view.document.viewport}}
+            ? {kind:'context',document:{id:view.document.id,revision:view.document.revision,
+                ...(tool.name==='set_viewport'?{viewport:view.document.viewport}:{selection:view.document.selection})},
+                ...(tool.name==='set_viewport'?{applied:result.applied}:{})}
             : batch
             ? (({ view: _, ...report }) => report)(result)
             : shown
@@ -145,7 +147,9 @@ export function createMcp(store: Store, deliver = deliverView) {
           }
           return {
             content: [
-              { type: "text", text: JSON.stringify(structuredContent) },
+              // Typed data has one canonical payload. Repeating it as escaped
+              // text doubled large topology replies before they reached the app.
+              { type: "text", text: `${tool.title}${structuredContent?.document?.name?` — ${structuredContent.document.name}`:''}` },
               ...pictures.map((p) => ({
                 type: "image" as const,
                 data: p.data,

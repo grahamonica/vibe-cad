@@ -18,6 +18,7 @@ export interface ViewportHandle {
   session(): SketchSession | undefined;
 }
 export interface ViewportProps {
+  cameraClientId?: string;
   interactionDisabled?:boolean;
   directDragEnabled?:boolean;
   directDragMode?:'rotate'|'translate';
@@ -291,20 +292,26 @@ export const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewp
   useEffect(() => {
     sceneRef.current?.setSelection(props.highlight.refs, props.highlight.planes);
   }, [sceneEpoch, JSON.stringify(props.highlight)]);
-  // Restore the saved camera once per document.
-  const restored = useRef<string | null>(null);
+  // Local camera acknowledgements do not move the user's live view. A newer
+  // command from another writer is applied once, independently of solid revision.
+  const restored = useRef<{ id: string; version: number } | null>(null);
   useEffect(() => {
     const scene = sceneRef.current,
       v = props.view;
     if (!scene || !v || !v.geometry.bodies.length) return;
-    if (restored.current !== v.document.id) {
-      restored.current = v.document.id;
-      if (v.document.viewport) scene.restoreCamera(v.document.viewport.position, v.document.viewport.target, v.document.viewport.up, v.document.viewport.zoom);
+    const camera = v.document.viewport, version = camera?.version ?? 0;
+    const opening = restored.current?.id !== v.document.id;
+    if (opening || restored.current?.version !== version) {
+      restored.current = { id: v.document.id, version };
+      if (camera && (opening || camera.writer !== props.cameraClientId))
+        scene.restoreCamera(camera.position, camera.target, camera.up, camera.zoom);
     }
-    // Refit after the streamed assembly settles, rather than centering permanently on its first body.
+    // Unspecified/older cameras are fitted after streaming settles. An explicit
+    // versioned pose keeps its requested target and zoom.
+    if (camera?.version !== undefined) return;
     const timer = setTimeout(() => scene.orient(v.document.viewport ? 'fit' : 'iso', false, false), 300);
     return () => clearTimeout(timer);
-  }, [sceneEpoch, props.view?.document.id, props.view?.geometry.bodies.length]);
+  }, [sceneEpoch, props.view?.document.id, props.view?.geometry.bodies.length,props.view?.document.viewport?.version,props.cameraClientId]);
   // Datum planes.
   const planeKey = JSON.stringify(props.planes);
   useEffect(() => {

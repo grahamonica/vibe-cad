@@ -27,6 +27,15 @@ The document store owns committed design state. The geometry worker validates ca
 
 ## Practical verification
 
+The native 1.1.13 check rendered the representative 86-body assembly and completed a live 24-hour motion preview. Pause showed a changed sky position; Stop restored the saved pose. After Close, the host's MCP App inventory contained no editor. A warm `open_cad` request returned in 1.9 seconds; that is backend request time, not a first-frame measurement. The host teardown callback was not observed, so physical tab closure is not claimed from inventory alone. This does not establish a zero crash rate.
+
+That check also exposed two protocol defects addressed in 1.1.14:
+
+- Change polling ignored camera state, and the viewport restored a camera only when opening another document. Cameras now have an independent version and writer. External commands apply once; local acknowledgements do not rewind the live view. A delayed save cannot overwrite a foreign command, and a stale save returns `applied:false` with the current camera. Camera and selection acknowledgements update only their own metadata and preserve geometry identity.
+- Inspecting an imported body with 15,956 references timed out after 300 seconds. Its cached metadata occupied 8.85 MB and was repeated as both text and typed JSON, yielding roughly 18 MB before protocol overhead. Body inspection now returns 200 references by default, supports geometry/area filters and pagination, and sends typed data once. Solid geometry, display detail and exports are unchanged.
+
+Five focused context/MCP checks cover metadata ordering, stale-camera protection, unchanged geometry identity, and bounded inspection of a large body. The 1.1.14 camera and inspection paths still require native verification after activation; the 1.1.13 rendering check does not substitute for that.
+
 Use the focused checks for the changed boundary and one representative real model sequence. Do not run the full benchmark collection on every edit. The audit sequence copied the current 54-document assembly and its eight imported blobs into a disposable store, loaded 86 rendered bodies, passed the actual resource stream through the browser receiver, changed and restored the detailed forest, and reopened the assembly in the same session. It preserved all original forest entities and final body volumes, CAD selection metadata and GPU display coordinates. The disposable store was removed; canonical document bytes were unchanged.
 
 The host logs establish two renderer exits with code 5 on October 30. They do not establish the memory cause of those exits. October 31 logs also contain thousands of repeated closed-transport warning lines; those lines are not separate crash events. These are distinct observations, not a basis for claiming a measured overall crash-rate reduction.
