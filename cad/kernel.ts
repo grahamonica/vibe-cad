@@ -221,8 +221,12 @@ function topologies(bodyId: string, shape: r.Shape3D): TopologySet {
       }
       let concave: boolean | undefined;
       if (kind === "face" && ["CYLINDRE", "CYLINDER", "CONE"].includes(item.geomType)) {
-        const rim = (item as r.Face).edges.find((e) => e.geomType === "CIRCLE");
-        const circle = rim && circleOf(rim);
+        const scope = new NativeScope();
+        let circle: ReturnType<typeof circleOf>;
+        try {
+          const rim = scope.all((item as r.Face).edges).find((e) => e.geomType === "CIRCLE");
+          circle = rim && circleOf(rim);
+        } finally { scope.dispose(); }
         if (circle) {
           axis = { origin: circle.center, direction: circle.normal };
           if (item.geomType !== "CONE") radius = circle.radius;
@@ -1721,9 +1725,11 @@ function bendSheet(ctx: Build, f: Feature, body: r.Shape3D): r.Shape3D {
 /** Hash codes of seam edges: edges a face meets on both sides of itself. */
 function seamEdges(shape: r.Shape3D, topology?: ReturnType<typeof topologies>): Set<number> {
   const oc = r.getOC() as any,
-    seams = new Set<number>();
-  for (const face of shape.faces)
-    for (const edge of face.edges) if (oc.BRep_Tool.IsClosed(edge.wrapped, face.wrapped)) seams.add(edge.hashCode);
+    seams = new Set<number>(), scope = new NativeScope();
+  try {
+    for (const face of scope.all(shape.faces))
+      for (const edge of scope.all(face.edges)) if (oc.BRep_Tool.IsClosed(edge.wrapped, face.wrapped)) seams.add(edge.hashCode);
+  } finally { scope.dispose(); }
   if (topology) for (const hash of sameSurfaceEdges(shape, topology)) seams.add(hash);
   return seams;
 }
@@ -2504,6 +2510,11 @@ function inertiaTensor(properties: any, center: Vec3): Tensor {
     xz = about([h, 0, h]) - (xx + zz) / 2;
   return [xx, yy, zz, xy, yz, xz];
 }
+// One display policy for modeled parts and generated assembly solids. Preserve
+// the 0.05mm chord bound without oversampling tiny purchased electronics.
+// BReps, topology, cutting profiles and manufacturing export meshes are unchanged.
+const DISPLAY_MESH = { tolerance: 0.05, angularTolerance: 0.35 };
+
 export async function rebuild(doc: Document): Promise<Geometry> {
   const reusable = !(doc.components?.length);
   const identity = reusable ? renderIdentity(doc) : undefined;
@@ -2513,21 +2524,34 @@ export async function rebuild(doc: Document): Promise<Geometry> {
   const ctx = await buildModel(doc);
   ctx.dispose();
   const shapes = ctx.shapes;
+  const measurements = new NativeScope();
   try {
     const bodies: RenderBody[] = [];
     // Mass of a solid (g): the typed-in part mass spread over the visible solids,
     // printed walls around a partly filled interior, or solid material.
     const suppressed = suppressedBodies(doc);
     const shown = [...shapes].filter(([id]) => !suppressed.has(id) && doc.bodies.some((b) => b.id === id && !b.hidden));
-    const shownVolume = shown.reduce((sum, [, shape]) => sum + r.measureVolume(shape), 0);
+    // Reuse one exact integration for volume, mass, centroid and inertia. The
+    // previous path reintegrated each imported solid up to six times per view.
+    const propertiesByShape = new Map<r.Shape3D, r.VolumePhysicalProperties>();
+    const propertiesOf = (shape: r.Shape3D) => {
+      let properties = propertiesByShape.get(shape);
+      if (!properties) {
+        properties = measurements.own(r.measureShapeVolumeProperties(shape));
+        propertiesByShape.set(shape, properties);
+      }
+      return properties;
+    };
+    const shownVolume = doc.massOverride === undefined ? 0
+      : shown.reduce((sum, [, shape]) => sum + propertiesOf(shape).volume, 0);
     const material = doc.material;
-    const massOf = (shape: r.Shape3D): number | undefined =>
+    const massOf = (volume: number, area: number): number | undefined =>
       doc.massOverride !== undefined
-        ? (doc.massOverride * r.measureVolume(shape)) / Math.max(1e-9, shownVolume)
+        ? (doc.massOverride * volume) / Math.max(1e-9, shownVolume)
         : material?.printed
-          ? printedMass(r.measureVolume(shape), r.measureArea(shape), material.density, (material.infill ?? 100) / 100, material.wall ?? defaultPrintWall)
+          ? printedMass(volume, area, material.density, (material.infill ?? 100) / 100, material.wall ?? defaultPrintWall)
           : material
-            ? (r.measureVolume(shape) * material.density) / 1000
+            ? (volume * material.density) / 1000
             : undefined;
     for (const [id, shape] of shapes) {
       const body = doc.bodies.find((b) => b.id === id);
@@ -2535,27 +2559,31 @@ export async function rebuild(doc: Document): Promise<Geometry> {
       const topology = topologies(id, shape),
         names = namesOf(shape);
       const metadata = new Map(topology.metadata.map(t => [t.id, t]));
-      for (const face of shape.faces) {
-        const tid = topology.hashes.get(face.hashCode),
-          t = tid && metadata.get(tid),
+      for (const [tid, face] of topology.objects) {
+        const t = metadata.get(tid),
           name = names.get(face.hashCode);
-        if (t && name) t.featureId = ownerOf(name);
+        if (t?.kind === "face" && name) t.featureId = ownerOf(name);
       }
       const sourceColors=new Map<string,string>();
       if(body.importAppearance) for(const feature of doc.features.filter(f=>f.type==="import"&&f.bodyId===id)) {
         const p=feature.params as any, cached=importCache.get(`${p.blob}:${p.format ?? "step"}:${p.scale ?? 1}`);
-        cached?.shape.faces.forEach((face,i)=>{const c=cached.colors.get(face.hashCode);if(c)sourceColors.set(`${feature.id}:f${i}`,c);});
+        if(cached) {
+          const scope = new NativeScope();
+          try { scope.all(cached.shape.faces).forEach((face,i)=>{const c=cached.colors.get(face.hashCode);if(c)sourceColors.set(`${feature.id}:f${i}`,c);}); }
+          finally { scope.dispose(); }
+        }
       }
-      const mesh = shape.mesh({ tolerance: 0.05, angularTolerance: 0.15 }),
-        allEdges = shape.meshEdges({ tolerance: 0.05, angularTolerance: 0.15 });
+      const mesh = shape.mesh(DISPLAY_MESH),
+        allEdges = shape.meshEdges(DISPLAY_MESH);
       // Seam edges (where a cylinder or other closed surface wraps round) and joints between two
       // faces of one surface are not model edges; like other CAD systems, they are never drawn.
       const seams = seamEdges(shape, topology),
         edges = { ...allEdges, edgeGroups: allEdges.edgeGroups.filter((g) => !seams.has(g.edgeId)) },
         tangent = tangentEdgeIds(shape, topology, seams);
-      const properties = r.measureShapeVolumeProperties(shape);
-      const mass = massOf(shape),
-        density = mass === undefined ? 0 : mass / Math.max(1e-12, r.measureVolume(shape));
+      const properties = propertiesOf(shape),
+        volume = properties.volume, surfaceArea = r.measureArea(shape),
+        mass = massOf(volume, surfaceArea),
+        density = mass === undefined ? 0 : mass / Math.max(1e-12, volume);
       bodies.push({
         id,
         name: body.name,
@@ -2589,8 +2617,8 @@ export async function rebuild(doc: Document): Promise<Geometry> {
         ...(ctx.threads.some((t) => t.bodyId === id) ? { threads: ctx.threads.filter((t) => t.bodyId === id) } : {}),
         ...(ctx.drives.has(id) ? { drive: ctx.drives.get(id) } : {}),
         bounds: shape.boundingBox.bounds,
-        volume: r.measureVolume(shape),
-        surfaceArea: r.measureArea(shape),
+        volume,
+        surfaceArea,
         centerOfMass: properties.centerOfMass,
         ...(mass !== undefined
           ? {
@@ -2604,7 +2632,6 @@ export async function rebuild(doc: Document): Promise<Geometry> {
             }
           : {}),
       });
-      properties.delete();
     }
     bodies.push(...(await instanceBodies(doc)));
     const geometry = placeGeometry(doc, {
@@ -2637,6 +2664,7 @@ export async function rebuild(doc: Document): Promise<Geometry> {
     if (identity) rememberRender(doc, identity, geometry, performance.now() - renderStarted);
     return geometry;
   } finally {
+    measurements.dispose();
     for (const s of shapes.values()) disposeShape(s);
   }
 }
@@ -3021,12 +3049,12 @@ async function beltSolid(doc: Document, c: Component, placements: Record<string,
 /** A generated solid as a render body: mesh, edges, topology and mass from a density (g/cm³). */
 function renderSolid(id: string, name: string, color: string, shape: r.Shape3D, density: number): RenderBody {
   const topology = topologies(id, shape);
-  const mesh = shape.mesh({ tolerance: 0.05, angularTolerance: 0.15 }),
-    allEdges = shape.meshEdges({ tolerance: 0.05, angularTolerance: 0.15 }),
+  const mesh = shape.mesh(DISPLAY_MESH),
+    allEdges = shape.meshEdges(DISPLAY_MESH),
     seams = seamEdges(shape, topology);
   const properties = r.measureShapeVolumeProperties(shape);
   try {
-    const volume = r.measureVolume(shape),
+    const volume = properties.volume,
       perMm3 = density / 1000;
     return {
       id,

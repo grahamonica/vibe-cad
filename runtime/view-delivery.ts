@@ -48,7 +48,7 @@ export async function deliverView(store: Store, view: View): Promise<Record<stri
     yield record({ type: "complete" });
   }
   // Compress one record at a time instead of allocating decimal/binary copies
-  // of the entire assembly. The retained memory budget stays at 32 MiB.
+  // of the entire assembly. A higher transfer ceiling does not reserve memory.
   const source = Readable.from(records(), { highWaterMark: 1 });
   const stream = createDeflate();
   // pipeline propagates producer errors to the consumer and tears down both
@@ -75,13 +75,14 @@ export async function deliverView(store: Store, view: View): Promise<Record<stri
   const token = createHash('sha256').update(data).digest('hex');
   const existing = entries.get(token);
   if (existing) existing.expires = Date.now() + 15 * 60_000;
+  const cacheBudget = Math.max(VIEW_LIMITS.retainedBytes, data.length);
   let total = [...entries.values()].reduce((n, e) => n + e.bytes, 0);
   for (const [id, entry] of entries) {
-    if (entries.size < 8 && total + (existing ? 0 : data.length) <= deliveryBudget) break;
+    if (entries.size < 8 && total + (existing ? 0 : data.length) <= cacheBudget) break;
     if (id === token || entry.lease > Date.now()) continue;
     entries.delete(id); total -= entry.bytes;
   }
-  if (!existing && (entries.size >= 8 || total + data.length > deliveryBudget)) throw Error('Too many models loading at once; wait for the active model or close inactive editor panels');
+  if (!existing && (entries.size >= 8 || total + data.length > cacheBudget)) throw Error('Too many models loading at once; wait for the active model or close inactive editor panels');
   if (!existing) entries.set(token, { expires: Date.now() + 15 * 60_000, data, bytes: data.length, lease: 0 });
   return {
     viewChunks: {

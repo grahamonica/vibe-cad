@@ -58,11 +58,16 @@ test("large editor views stay below MCP message limits and retain an exact revis
     assert.deepEqual(Array.from(decoded.mesh.vertices),Array.from(precise.mesh.vertices,Math.fround));
     assert.deepEqual(Array.from(decoded.edges.lines),Array.from(precise.edges.lines,Math.fround));
     assert.deepEqual(decoded.topology,precise.topology);
+    assert.equal(packed.topologyEncoding,'body-relative-v1');
+    assert.ok(packed.topology.every(t=>t.bodyId===undefined && !t.id.startsWith(precise.id)));
+    assert.deepEqual(decoded.mesh.faceGroups,precise.mesh.faceGroups);
+    assert.deepEqual(decoded.edges.edgeGroups,precise.edges.edgeGroups);
+    assert.deepEqual(decoded.tangentEdges,precise.tangentEdges);
     assert.equal(decoded.volume,precise.volume);
     assert.equal(precise.mesh.vertices[0],0.123456789012345);
     const oldBytes=Buffer.alloc(precise.mesh.vertices.length*8);
     precise.mesh.vertices.forEach((v,i)=>oldBytes.writeDoubleLE(v,i*8));
-    assert.deepEqual(Array.from(unpackDisplayBody({...packed,edges:{...precise.edges,lines:Array.from(precise.edges.lines)},mesh:{...packed.mesh,
+    assert.deepEqual(Array.from(unpackDisplayBody({...precise,edges:{...precise.edges,lines:Array.from(precise.edges.lines)},mesh:{...precise.mesh,
       normals:Array.from(precise.mesh.normals),triangles:Array.from(precise.mesh.triangles),
       encoding:'f64-u32-le',vertices:oldBytes.toString('base64')}}).mesh.vertices),Array.from(precise.mesh.vertices,Math.fround));
     // Noisy unused vertices exercise multiple chunks without changing

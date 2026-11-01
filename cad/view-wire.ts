@@ -6,13 +6,19 @@ import type { RenderBody } from "./types.ts";
 /** One producer/consumer contract; cache limits do not define model validity. */
 export const VIEW_LIMITS = {
   inlineBytes: 256 * 1024,
-  compressedBytes: 32 * 1024 * 1024,
-  decodedBytes: 64 * 1024 * 1024,
-  recordBytes: 32 * 1024 * 1024,
+  compressedBytes: 128 * 1024 * 1024,
+  decodedBytes: 512 * 1024 * 1024,
+  recordBytes: 128 * 1024 * 1024,
+  // Normal cache retention is separate from the maximum transferable view.
+  // One larger snapshot may be retained alone while the editor receives it.
+  retainedBytes: 32 * 1024 * 1024,
   chunkBytes: 384 * 1024,
 } as const;
 
-export type WireBody = Omit<RenderBody, "mesh" | "edges"> & {
+export type WireBody = Omit<RenderBody, "mesh" | "edges" | "topology"> & {
+  /** Repeated instance paths are reconstructed exactly, sharing their strings. */
+  topologyEncoding?: "body-relative-v1";
+  topology: (Omit<RenderBody["topology"][number], "bodyId"> & { bodyId?: string })[];
   mesh: Omit<RenderBody["mesh"], "vertices" | "normals" | "triangles"> & {
     encoding: "f32-u32-le" | "f64-u32-le";
     vertices: string | number[];
@@ -26,6 +32,13 @@ export function packDisplayBody(
   body: RenderBody,
   base64: (bytes: Uint8Array) => string,
 ): WireBody {
+  const prefix = body.id + ":";
+  const local = (id: string) => typeof id === "string" && id.startsWith(prefix);
+  const relative = (id: string) => id.slice(prefix.length);
+  const compact = body.topology.every(t => t.bodyId === body.id && local(t.id))
+    && body.mesh.faceGroups.every(g => local(g.id))
+    && body.edges.edgeGroups.every(g => local(g.id))
+    && (body.tangentEdges ?? []).every(local);
   const pack = (values: number[] | Float32Array | Uint32Array, integer = false) => {
     const encodedLength = 4 * Math.ceil(values.length * 4 / 3);
     let jsonLength = values.length ? values.length + 1 : 2;
@@ -48,14 +61,21 @@ export function packDisplayBody(
   };
   return {
     ...body,
+    ...(compact ? {
+      topologyEncoding: "body-relative-v1" as const,
+      topology: body.topology.map(({bodyId: _, ...t}) => ({...t, id: relative(t.id)})),
+      ...(body.tangentEdges ? {tangentEdges: body.tangentEdges.map(relative)} : {}),
+    } : {}),
     mesh: {
       ...body.mesh,
+      ...(compact ? {faceGroups: body.mesh.faceGroups.map(g => ({...g, id: relative(g.id)}))} : {}),
       encoding: "f32-u32-le",
       vertices: pack(body.mesh.vertices),
       normals: pack(body.mesh.normals),
       triangles: pack(body.mesh.triangles, true),
     },
-    edges: { ...body.edges, lines: pack(body.edges.lines) },
+    edges: { ...body.edges, lines: pack(body.edges.lines),
+      ...(compact ? {edgeGroups: body.edges.edgeGroups.map(g => ({...g, id: relative(g.id)}))} : {}) },
   };
 }
 
@@ -81,14 +101,29 @@ export function unpackDisplayBody(body: WireBody | RenderBody): RenderBody {
   }
   const { encoding: _, ...mesh } = body.mesh as WireBody["mesh"];
   const edges = (body as WireBody).edges;
+  const {topologyEncoding, ...rest} = body as WireBody;
+  if (topologyEncoding !== undefined && topologyEncoding !== "body-relative-v1")
+    throw Error("Unknown CAD topology encoding");
+  const ids = new Map<string, string>();
+  const expand = (id: string) => {
+    let full = ids.get(id);
+    if (full === undefined) { full = body.id + ":" + id; ids.set(id, full); }
+    return full;
+  };
   return {
-    ...body,
+    ...rest,
+    topology: topologyEncoding
+      ? body.topology.map(t => ({...t, bodyId: body.id, id: expand(t.id)}))
+      : body.topology as RenderBody["topology"],
+    ...(topologyEncoding && body.tangentEdges ? {tangentEdges: body.tangentEdges.map(expand)} : {}),
     mesh: {
       ...mesh,
+      ...(topologyEncoding ? {faceGroups: mesh.faceGroups.map(g => ({...g, id: expand(g.id)}))} : {}),
       vertices: unpack(mesh.vertices),
       normals: unpack(mesh.normals),
       triangles: unpack(mesh.triangles, true),
     },
-    edges: { ...edges, lines: unpack(edges.lines) },
+    edges: { ...edges, lines: unpack(edges.lines),
+      ...(topologyEncoding ? {edgeGroups: edges.edgeGroups.map(g => ({...g, id: expand(g.id)}))} : {}) },
   };
 }

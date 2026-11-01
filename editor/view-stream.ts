@@ -24,14 +24,14 @@ export async function receiveView(
         break;
       }
       decodedBytes+=next.value.byteLength;
-      if(decodedBytes>VIEW_LIMITS.decodedBytes)throw Error('This view exceeds the 64 MiB transfer budget. Open a smaller assembly or hide detailed components before retrying.');
+      if(decodedBytes>VIEW_LIMITS.decodedBytes)throw Error(`This view exceeds the ${VIEW_LIMITS.decodedBytes/1024/1024} MiB transfer limit. Your saved document is unchanged.`);
       text += decoder.decode(next.value, { stream: true });
       let end: number;
       while ((end = text.indexOf("\n")) >= 0) {
         const line = text.slice(0, end);
         text = text.slice(end + 1);
         if (!line) continue;
-        if(line.length>VIEW_LIMITS.recordBytes)throw Error('A CAD body exceeds the per-body transfer budget. Simplify the detailed source component before retrying.');
+        if(line.length>VIEW_LIMITS.recordBytes)throw Error(`A CAD body exceeds the ${VIEW_LIMITS.recordBytes/1024/1024} MiB per-body transfer limit. Your saved document is unchanged.`);
         const record = JSON.parse(line);
         if (complete)
           throw Error("CAD stream contains records after completion");
