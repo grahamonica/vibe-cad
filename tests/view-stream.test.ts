@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createDeflate, deflateSync, constants } from "node:zlib";
-import { receiveView } from "../editor/view-stream.ts";
+import { receiveView, isDisplayView } from "../editor/view-stream.ts";
 import type { View } from "../cad/types.ts";
 import { packDisplayBody } from "../cad/view-wire.ts";
 const bodies = [
@@ -38,6 +38,11 @@ const header =
 const body = (index: number) =>
   JSON.stringify({ type: "body", body: packDisplayBody(view.geometry.bodies[index], bytes => Buffer.from(bytes).toString("base64")) }) + "\n";
 const done = JSON.stringify({ type: "complete" }) + "\n";
+test('a superseded transfer cannot replace the viewport with an inspection summary',()=>{
+  assert.equal(isDisplayView(view),true);
+  assert.equal(isDisplayView({...view,geometry:[]}),false);
+  assert.equal(isDisplayView({document:view.document,kind:'placement'}),false);
+});
 test("stream displays the first complete part before remaining bytes arrive, preserving CAD identities and precision", async () => {
   let controller!: ReadableStreamDefaultController<BufferSource>;
   const bytes = new ReadableStream<BufferSource>({

@@ -12,6 +12,7 @@ import { outputSchemas, viewOutput } from "./output-schemas.ts";
 import { Store } from "../cad/store.ts";
 import type { View } from "../cad/types.ts";
 import { deliverView, registerViewResources } from "./view-delivery.ts";
+import { deliverFile, registerFileResources } from './file-delivery.ts';
 import { placementAck } from '../cad/placement.ts';
 export const uiUri = `ui://vibe-cad/editor-${CAD_VERSION}.html`;
 // Keep the model catalog small enough to survive host catalog budgets. The
@@ -34,6 +35,7 @@ export function createMcp(store: Store, deliver = deliverView) {
     },
   );
   registerViewResources(server, store);
+  registerFileResources(server, store);
   const readEditor = async (uri: URL) => ({
     contents: [
       {
@@ -127,11 +129,7 @@ export function createMcp(store: Store, deliver = deliverView) {
           const download =
             ["export_file", "export_drawing"].includes(tool.name) &&
             result?.path
-              ? {
-                  filename: result.filename,
-                  mimeType: result.mimeType,
-                  base64: (await readFile(result.path)).toString("base64"),
-                }
+              ? await deliverFile(store, result)
               : undefined;
           // Tool completion and viewport delivery are different outcomes. Never
           // turn a committed edit into an operation error because its view fails.

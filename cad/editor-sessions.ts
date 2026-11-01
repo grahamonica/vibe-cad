@@ -1,7 +1,7 @@
 import {editorRecovery} from './editor-recovery.ts';
 /** Renderer heartbeats are not proof that a host tab has closed. */
 export class EditorSessions {
-  private sessions = new Map<string, { sessionId: string; documentId: string; touched: number; dirty: boolean; closeRequested: boolean; hostClosed:boolean; reloadRequested:boolean }>();
+  private sessions = new Map<string, { sessionId: string; documentId: string; touched: number; dirty: boolean; closeRequested: boolean; hostClosed:boolean; rendererRetired:boolean; reloadRequested:boolean }>();
   readonly limit = 5;
   constructor(private now = () => Date.now()) {}
   private sweep() {
@@ -11,19 +11,20 @@ export class EditorSessions {
       this.sessions.delete(retired.sessionId);
     }
   }
-  update(action: 'list' | 'register' | 'heartbeat' | 'close' | 'close_others' | 'reload' | 'teardown_ack'|'forget'|'resume', sessionId?: string, documentId?: string, dirty = false,confirmHostClosed=false) {
+  update(action: 'list' | 'register' | 'heartbeat' | 'close' | 'close_others' | 'reload' | 'retire' | 'teardown_ack'|'forget'|'resume', sessionId?: string, documentId?: string, dirty = false,confirmHostClosed=false) {
     this.sweep();
     if (action === 'register') {
       if (!sessionId || !documentId) throw Error('Register needs sessionId and documentId');
+      // A historical, unresponsive lease is not a live renderer. Keep it visible
+      // without letting missing host acknowledgements permanently prevent reopening.
+      const occupied = [...this.sessions.values()].filter(s => !s.hostClosed && !s.rendererRetired && this.now()-s.touched<=90_000 && s.sessionId !== sessionId).sort((a,b) => a.touched - b.touched);
       for (const s of this.sessions.values()) if (s.documentId === documentId && s.sessionId !== sessionId && !s.dirty&&!s.hostClosed) s.closeRequested = true;
-      const occupied = [...this.sessions.values()].filter(s => !s.hostClosed && s.sessionId !== sessionId).sort((a,b) => a.touched - b.touched);
       const denied = occupied.length >= this.limit;
       if(denied){const saved=occupied.find(s=>!s.dirty);if(saved)saved.closeRequested=true;}
       // Never hide a crashed/pending tab by expiring its lease, or overwrite another document's live session.
       const previous=this.sessions.get(sessionId);
       if(previous&&previous.documentId!==documentId&&!previous.hostClosed&&previous.dirty)throw Error('Finish or cancel unsaved edits before switching documents');
-      if(this.sessions.size>=32&&!previous)throw Error('Too many unconfirmed editor tabs. Close unused tabs with their × buttons before reopening.');
-      this.sessions.set(sessionId, {sessionId, documentId, touched: this.now(), dirty, closeRequested: denied,hostClosed:false,reloadRequested:false});
+      this.sessions.set(sessionId, {sessionId, documentId, touched: this.now(), dirty, closeRequested: denied,hostClosed:false,rendererRetired:false,reloadRequested:false});
     }
     const current = sessionId ? this.sessions.get(sessionId):undefined;
     if(action==='forget'){
@@ -38,10 +39,11 @@ export class EditorSessions {
       for(const s of targets)if(action==='close'){s.closeRequested=true;s.reloadRequested=false;}else if(!s.closeRequested)s.reloadRequested=true;
     }
     if(action==='teardown_ack'&&current){current.hostClosed=true;current.reloadRequested=false;}
+    if(action==='retire'&&current){if(current.dirty)throw Error('Finish or cancel unsaved edits before retiring this editor');current.rendererRetired=true;current.reloadRequested=false;}
     if (action === 'close_others') for (const s of this.sessions.values())
       if (s.sessionId !== sessionId && s.documentId !== documentId && !s.dirty&&!s.hostClosed) {s.closeRequested = true;s.reloadRequested=false;}
     this.sweep();
-    const editors=[...this.sessions.values()].map(s=>({...s,closed:s.hostClosed,status:s.hostClosed?'host_closed':this.now()-s.touched>90_000?'unresponsive':s.closeRequested?'close_requested':s.reloadRequested?'reload_requested':'active'}));
+    const editors=[...this.sessions.values()].map(s=>({...s,closed:s.hostClosed,status:s.hostClosed?'host_closed':s.rendererRetired?'renderer_retired':this.now()-s.touched>90_000?'unresponsive':s.closeRequested?'close_requested':s.reloadRequested?'reload_requested':'active'}));
     return {limit: this.limit, sessionId,resumeDocumentId:action==='resume'&&current&&!current.hostClosed&&!current.closeRequested?current.documentId:undefined,registerRequired:action==='heartbeat'&&!current,closeRequested:!!current && (current.closeRequested||current.hostClosed),reloadRequested:!!current?.reloadRequested,
       editors,deadPanelControl:'host-only',recoveryInstructions:editorRecovery,
       hostActionRequired:editors.some(s=>s.status==='unresponsive'),

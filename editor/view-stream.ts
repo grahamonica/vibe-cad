@@ -1,6 +1,12 @@
 import type { View } from "../cad/types.ts";
 import { unpackDisplayBody, VIEW_LIMITS } from "../cad/view-wire.ts";
 
+/** Inspection summaries and placement acknowledgements are not renderable views. */
+export function isDisplayView(value: unknown): value is View {
+  const view = value as View | null;
+  return !!view && typeof view.document?.id === 'string' && Number.isInteger(view.document.revision) && Array.isArray(view.geometry?.bodies);
+}
+
 /** Parse one pinned view incrementally; never mix revisions or incomplete bodies. */
 export async function receiveView(
   compressed: ReadableStream<BufferSource>,

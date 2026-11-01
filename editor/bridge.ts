@@ -4,6 +4,8 @@ import type { View } from "../cad/types.ts";
 import { App } from "@modelcontextprotocol/ext-apps";
 import { VIEW_LIMITS } from "../cad/view-wire.ts";
 import { receiveView } from "./view-stream.ts";
+import { receiveFile } from './file-download.ts';
+import type { FileDownload } from '../cad/file-wire.ts';
 
 let app: App | undefined;
 let ready: Promise<void> | undefined;
@@ -23,12 +25,11 @@ let completeDocumentId: string | undefined;
 export function onTransfer(fn: (state: ViewTransfer) => void) {
   transferListener = fn;
 }
-let resumeState:{documentId:string;sessionId:string}|undefined;
-try{if((performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming)?.type==='reload'){const r=JSON.parse(sessionStorage.getItem('vibe-cad:resume')??'null');if(typeof r?.documentId==='string'&&typeof r?.sessionId==='string')resumeState=r;}sessionStorage.removeItem('vibe-cad:resume');}catch{}
-let editorSessionId=resumeState?.sessionId??globalThis.crypto.randomUUID();
+let resumeDocumentId:string|undefined;
+let editorSessionId:string=globalThis.crypto.randomUUID();
 export const getEditorSessionId=()=>editorSessionId;
 function hostSessionId(){const id=app?.getHostContext()?.toolInfo?.id;return id===undefined?undefined:`tool:${String(id)}`;}
-export function takeResumeDocument(){const id=resumeState?.documentId;resumeState=undefined;return id;}
+export function takeResumeDocument(){const id=resumeDocumentId;resumeDocumentId=undefined;return id;}
 let editorDocumentId:string|undefined,registeredDocumentId:string|undefined,editorDirty=false,interactionDirty=false,draftDirty=false,closed=false,registryPending=0;
 let registryQueue:Promise<unknown>=Promise.resolve();
 let closeListener:(()=>void)|undefined,editorTimer:ReturnType<typeof setInterval>|undefined;
@@ -49,7 +50,10 @@ function updateDirty(){const dirty=draftDirty||interactionDirty,changed=editorDi
 export function setEditorDirty(dirty:boolean){draftDirty=dirty;updateDirty();}
 export function setInteractionDirty(dirty:boolean){interactionDirty=dirty;updateDirty();}
 export const editorAlive=()=>!closed && connection.active;
-function retireEditor(){if(closed)return;closed=true;listener=undefined;transferGeneration++;if(editorTimer)clearInterval(editorTimer);closeListener?.();}
+async function retireEditor(){
+ if(closed)return;closed=true;listener=undefined;transferGeneration++;if(editorTimer)clearInterval(editorTimer);closeListener?.();
+ if(connection.active&&app&&editorDocumentId)await serverTool('manage_editors',{action:'retire',sessionId:editorSessionId,documentId:editorDocumentId,dirty:false},5000).catch(()=>{});
+}
 async function editorRegistry(action:'register'|'heartbeat'|'close'|'close_others'|'teardown_ack'){
  if(!app||!editorDocumentId||action==='heartbeat'&&registryPending)return;
  registryPending++;const documentId=editorDocumentId;
@@ -61,7 +65,7 @@ async function editorRegistry(action:'register'|'heartbeat'|'close'|'close_other
   if(operation==='register')registeredDocumentId=documentId;
   const result=r.structuredContent as {closeRequested?:boolean;reloadRequested?:boolean;registerRequired?:boolean}|undefined;
   if(result?.registerRequired)registeredDocumentId=undefined;
-  if(action!=='teardown_ack'&&result?.closeRequested&&!editorDirty){retireEditor();await app!.requestTeardown().catch(()=>{});}
+  if(action!=='teardown_ack'&&result?.closeRequested&&!editorDirty){await retireEditor();await app!.requestTeardown().catch(()=>{});}
   else if(result?.reloadRequested&&!editorDirty)await performReload();
  }).finally(()=>{registryPending--;});
  registryQueue=task;
@@ -72,17 +76,23 @@ export async function closeEditor(){
  if(editorDirty)throw Error('Finish or cancel unsaved edits before closing');
  try { if(connection.active){await editorRegistry('heartbeat');await editorRegistry('close');} }
  catch(error){if(connection.active)throw error;}
- if(!closed){retireEditor();await app?.requestTeardown();}
+ if(!closed){await retireEditor();await app?.requestTeardown();}
 }
 export async function closeOtherEditors(){await editorRegistry('close_others');}
 async function performReload(){
  if(closed)return;if(editorDirty)throw Error('Finish or cancel unsaved edits before reloading');
- try{sessionStorage.setItem('vibe-cad:resume',JSON.stringify({documentId:editorDocumentId,sessionId:editorSessionId}));}
- catch{if(!hostSessionId())throw Error('This host provides neither session storage nor a stable panel identity for reload. Close this tab with × and reopen the saved design.');}
- retireEditor();
- await new Promise<void>(resolve=>setTimeout(resolve,50));window.location.reload();
+ if(!editorDocumentId)return;
+ // Rehydrate the saved document through the existing host bridge. Navigating
+ // the embedded frame can destroy its host target instead of reloading it.
+ const result=await serverTool('manage_editors',{action:'register',sessionId:editorSessionId,documentId:editorDocumentId,dirty:false},5000);
+ if(result.isError)throw Error(result.content?.find(c=>c.type==='text')?.text??'Cannot refresh this editor');
+ registeredDocumentId=editorDocumentId;
+ transferGeneration++;
+ transferListener?.({active:false,received:0,total:0});
+ const view=await call<View>('inspect_document',{documentId:editorDocumentId});
+ if(view?.geometry&&Array.isArray(view.geometry.bodies))listener?.(view);
 }
-export async function reloadEditor(discardUnsaved=false){if(discardUnsaved){draftDirty=false;interactionDirty=false;updateDirty();}await editorRegistry('heartbeat');await performReload();}
+export async function reloadEditor(discardUnsaved=false){if(discardUnsaved){draftDirty=false;interactionDirty=false;updateDirty();}await performReload();}
 export async function initialize() {
   if (ready) return ready;
   app = new App(
@@ -101,7 +111,7 @@ export async function initialize() {
     } catch(error) {transferListener?.({active:false,received:0,total:0,error:error instanceof Error?error.message:'The editor could not load the saved design.'});}
   };
   app.onteardown = async () => {
-    retireEditor();
+    await retireEditor();
     await editorRegistry('teardown_ack').catch(()=>{});
     transferGeneration++;
     transferListener?.({ active: false, received: 0, total: 0 });
@@ -111,10 +121,10 @@ export async function initialize() {
   ready=(async()=>{
     await connected;
     const identity=hostSessionId();if(identity)editorSessionId=identity;
-    if(!resumeState&&identity){
-      try{const r=await serverTool('manage_editors',{action:'resume',sessionId:editorSessionId},5000);const id=(r.structuredContent as any)?.resumeDocumentId;if(!r.isError&&typeof id==='string')resumeState={documentId:id,sessionId:editorSessionId};}catch{}
+    if(identity){
+      try{const r=await serverTool('manage_editors',{action:'resume',sessionId:editorSessionId},5000);const id=(r.structuredContent as any)?.resumeDocumentId;if(!r.isError&&typeof id==='string')resumeDocumentId=id;}catch{}
     }
-    if(resumeState)editorDocumentId=resumeState.documentId;
+    if(resumeDocumentId)editorDocumentId=resumeDocumentId;
     editorTimer=setInterval(()=>{if(!closed)void editorRegistry('heartbeat').catch(()=>{});},5000);
   })();
   await ready;
@@ -238,10 +248,9 @@ export async function call<T = any>(
     );
   const documentId=(result.structuredContent as any)?.document?.id;
   if(documentId)await noteEditorDocument(documentId);
-  const file = result._meta?.download as
-    { filename: string; mimeType: string; base64: string } | undefined;
+  const file = result._meta?.download as FileDownload | undefined;
   if (file) {
-    const data = Uint8Array.from(atob(file.base64), (c) => c.charCodeAt(0));
+    const data = await receiveFile(file, uri => connection.request(() => app!.readServerResource({uri})));
     return {
       ...(result.structuredContent as Record<string, unknown>),
       filename: file.filename,

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { View } from "../cad/types.ts";
 import { applyContextAck, cameraWriteArgs } from './context-ack.ts';
 import { applyPlacementAck } from '../cad/placement.ts';
+import { isDisplayView } from './view-stream.ts';
 import {
   call,
   context,
@@ -94,7 +95,7 @@ export function useCad() {
   buildRef.current = build;
   latest.current = view;
   const accept = (v: View) => {
-    if (!v?.document) return;
+    if (!isDisplayView(v)) return;
     const current = latest.current;
     if (
       current?.document.id === v.document.id &&
@@ -181,14 +182,14 @@ export function useCad() {
     return () => clearInterval(timer);
   }, []);
   useEffect(() => {
-    let polling = false, unsupported = false, disposed = false;
+    let polling = false, disposed = false;
     const timer = setInterval(() => {
       if(!editorAlive()){clearInterval(timer);return;}
-      if (!editorAlive() || polling || unsupported || document.hidden) return;
+      if (!editorAlive() || polling || document.hidden) return;
       polling = true;
       void call<{ build: BuildState }>('control_build', { action: 'status' })
         .then(r => { if (!disposed) setBuild(r.build); })
-        .catch(() => { unsupported = true; })
+        .catch(() => {})
         .finally(() => { polling = false; });
     }, 1500);
     return () => { disposed = true; clearInterval(timer); };
