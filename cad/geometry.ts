@@ -53,8 +53,8 @@ export const motionSweep = (
   against?: string[],
   followers: { ids: string[]; origin: [number, number, number]; direction: [number, number, number]; factor: number; mesh: number[]; meshTolerance: number; meshPeriod?: number }[] = [],
 ) => call<any>("motionSweep", [doc, moving, motion, against, followers]);
-export const interferences = (doc: Document, only?: string[], excludeHidden = false) =>
-  call<{ interferes: boolean; pairs: { a: string; b: string; aName: string; bName: string; volume: number }[]; bodies: number; checked: number }>("interferences", [doc, only, excludeHidden]);
+export const interferences = (doc: Document, only?: string[], excludeHidden = false, componentIds?: string[]) =>
+  call<{ interferes: boolean; pairs: { a: string; b: string; aName: string; bName: string; volume: number }[]; bodies: number; checked: number }>("interferences", [doc, only, excludeHidden, componentIds]);
 export const mechanismSweep = (
   doc: Document,
   driver: string,

@@ -134,6 +134,22 @@ test("run_steps: a part and an assembly built together; appearance, suppression,
   assert.equal(clash.interferes, true);
   near(clash.pairs[0].volume, Math.PI * 100 * 5, 1, "overlap volume");
   assert.deepEqual([clash.pairs[0].aName, clash.pairs[0].bName].sort(), ["Bottom", "Top"]);
+  // A component-scoped solid query must not generate a display mesh first.
+  const originalView = store.view;
+  store.view = async () => { throw Error("Interference detection requested a display mesh"); };
+  try {
+    const selected = await run("check_interference", { componentIds: [bottom.id, top.id] }, stack);
+    near(selected.pairs[0].volume, clash.pairs[0].volume, 1e-6, "selected overlap volume");
+    const single = await run("check_interference", { componentIds: [bottom.id] }, stack);
+    assert.equal(single.bodies, 1);
+    assert.equal(single.interferes, false);
+    const readBatch = await run("run_steps", { steps: [{ tool: "check_interference", args: { componentIds: [bottom.id, top.id] }, as: "clash" }] }, stack);
+    assert.equal(readBatch.ok, true, readBatch.error);
+    near(readBatch.steps[0].result.pairs[0].volume, clash.pairs[0].volume, 1e-6, "batched overlap volume");
+    assert.equal(readBatch.view, undefined);
+  } finally {
+    store.view = originalView;
+  }
   // Hidden still weighs and still interferes; suppressed is gone from the model, the BOM and the checks.
   v = await run("set_visibility", { objectId: top.id, hidden: true }, stack);
   assert.equal(v.geometry.bodies.find((b) => b.id.startsWith(`${top.id}/`))!.hidden, true);

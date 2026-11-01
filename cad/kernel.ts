@@ -60,7 +60,7 @@ import type {
   Component,
   ThreadRecord,
 } from "./types.ts";
-import { allComponents, componentOf } from "./types.ts";
+import { allComponents, componentOf, componentOwns } from "./types.ts";
 let ready: Promise<void> | undefined;
 export function initKernel() {
   return (ready ??= readFile(
@@ -3337,10 +3337,17 @@ export async function measureGeometry(
  * pair of bodies from different components (or among the given bodies) that
  * overlap, with the volume they share. Bodies that only touch do not count.
  */
-export async function interferences(doc: Document, only?: string[], excludeHidden = false) {
+export async function interferences(doc: Document, only?: string[], excludeHidden = false, componentIds?: string[]) {
+  const components = allComponents(doc);
+  const selected = componentIds?.length ? componentIds.map((id) => {
+    const component = components.find((c) => c.id === id);
+    if (!component) throw Error(`Component ${id} not found`);
+    return component;
+  }) : undefined;
   const shapes = await buildPlacedShapes(doc);
   try {
-    const ids = [...shapes.keys()].filter((id) => (!only || only.includes(id)) && !(excludeHidden && bodyHidden(doc, id)));
+    const ids = [...shapes.keys()].filter((id) => (!only || only.includes(id)) &&
+      (!selected || selected.some((c) => componentOwns(c, id))) && !(excludeHidden && bodyHidden(doc, id)));
     const owner = (id: string) => componentOf(doc, id)?.id ?? id,
       name = (id: string) => componentOf(doc, id)?.name ?? doc.bodies.find((b) => b.id === id)?.name ?? id;
     const boxes = new Map(ids.map((id) => [id, shapes.get(id)!.boundingBox.bounds]));

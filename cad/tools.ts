@@ -3549,10 +3549,7 @@ export function toolset(store: Store) {
     true,
     async (a) => {
       const doc = await store.read(a.documentId);
-      const only = a.componentIds?.length
-        ? (await store.view(doc)).geometry.bodies.filter((b) => a.componentIds!.some((cid: string) => { const c = allComponents(doc).find((x) => x.id === cid); if (!c) throw Error(`Component ${cid} not found`); return componentOwns(c, b.id); })).map((b) => b.id)
-        : undefined;
-      return interferences(await store.kernelDocument(doc), only, a.excludeHidden);
+      return interferences(await store.kernelDocument(doc), undefined, a.excludeHidden, a.componentIds);
     },
   );
   add(
@@ -4934,8 +4931,10 @@ Example, a plate with a hole and rounded corners: [{"tool":"create_sketch","args
           const ready = (await select(args, view)) as Record<string, unknown>;
           const before = docId ? await store.read(docId) : undefined;
           if (before && "expectedRevision" in tool.schema.shape && ready.expectedRevision === undefined) ready.expectedRevision = before.revision;
-          if (before && !tool.readOnly && !touched.has(before.id) && !created.includes(before.id)) touched.set(before.id, snapshot(before));
-          const warnings = new Set(before ? (await view()).geometry.warnings : []);
+          // Document writes carry a revision guard; queries and file exports need no display rebuild.
+          const changesDocument = !tool.readOnly && "expectedRevision" in tool.schema.shape;
+          if (before && changesDocument && !touched.has(before.id) && !created.includes(before.id)) touched.set(before.id, snapshot(before));
+          const warnings = new Set(before && changesDocument ? (await view()).geometry.warnings : []);
           const result: any = await tool.handler(tool.schema.parse(ready), s);
           const resultDoc: string | undefined = result?.document?.id ?? docId;
           const after = resultDoc ? await store.read(resultDoc) : undefined;
@@ -4947,7 +4946,8 @@ Example, a plate with a hole and rounded corners: [{"tool":"create_sketch","args
           if (step.as) named.set(step.as, { document: resultDoc, made, ...(tool.readOnly ? { result } : {}) });
           if (resultDoc && !tool.readOnly) current = resultDoc;
           const fresh = (result?.geometry?.warnings as string[] | undefined)?.filter((w) => !warnings.has(w)) ?? [];
-          const compact = tool.readOnly && !(result?.document && result?.geometry) && JSON.stringify(result ?? null).length <= 6000 ? { result } : {};
+          const compact = tool.readOnly && !(result?.document && result?.geometry) &&
+            (step.tool === "check_definition" || JSON.stringify(result ?? null).length <= 6000) ? { result } : {};
           results.push({ step: index + 1, tool: step.tool, ...(step.as ? { as: step.as } : {}), ok: true, ...(Object.keys(made).length ? { created: made } : {}), ...(fresh.length ? { warnings: fresh } : {}), ...compact });
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e);
@@ -4966,7 +4966,7 @@ Example, a plate with a hole and rounded corners: [{"tool":"create_sketch","args
           };
         }
       }
-      const final = current ? await store.view(await store.read(current)) : undefined;
+      const final = current && (touched.size || created.length) ? await store.view(await store.read(current)) : undefined;
       return {
         ok: true,
         steps: results,
