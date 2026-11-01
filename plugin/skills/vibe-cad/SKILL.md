@@ -26,6 +26,8 @@ Use native Vibe CAD tools to display this resource; running an MCP client throug
 
 ### Keep the working set small
 
+Call `manage_editors` directly, outside `run_steps`. Editor lifecycle actions are independent of CAD transactions and cannot be rolled back with model edits.
+
 Reuse one assembly editor while building linked parts. Only `open_cad` should open another editor panel; ordinary edits and `run_steps` update the existing editor through its shared document. Aim for at most five open CAD panels, never more than ten. Use `manage_editors` to list panels at least every ten tool calls and before opening another editor; use `close_others` with the working assembly documentId to retire saved, unused panels. The UI also provides Close editor and Close other editors. Drafts are protected, and retired editors dispose their renderer and request host teardown. A close request is not confirmed closure: `closed` requires the host teardown callback. Unresponsive sessions remain listed instead of silently expiring. Request `reload` for a responsive editor only. A dead native renderer cannot receive a plugin command. If a gray sad-face tab appears, immediately instruct the user to close its Open CAD editor tab with ×, then reopen the saved assembly once. If tools also report Transport closed or the replacement crashes, restart Codex and reopen; reinstalling is unnecessary for a view crash. Use `forget` only after the user confirms closing that host tab, with `confirmHostClosed:true`; it removes the stale record and does not close anything. Do not open every part just to inspect it.
 
 Prefer simple fastener solids and single-sketch landscape layers. Avoid detailed threads unless needed for an interface. Never repeatedly launch whole-assembly booleans after the kernel reports a timeout. Use scoped checks, inspected dimensions and explicitly stated validation limits.
@@ -60,7 +62,7 @@ Use `run_steps` for any sequence of operations: one request instead of many call
 
 The model's direct tool list intentionally contains the main document, editor, sketch, build, inspection and export tools. The editor has every typed operation. For specialist operations listed below, request their exact schemas with `get_tool_schema`, then use their names and validated arguments in `run_steps`. An operation absent from the direct list is still usable through the batch. Never fall back to a shell or the retired development app.
 
-- **Steps.** Each step is `{ "tool", "args", "as" }`, and any tool except history, preview and git tools can be a step.
+- **Steps.** Each step is `{ "tool", "args", "as" }`. Editor lifecycle, build control, storage cleanup, history, preview and git commands run separately.
 - **Filled in for you.** Each step gets `documentId` and `expectedRevision` automatically. Give `documentId` (such as `"@bracket.document"`) to work on another document.
 - **References.** `"@name.kind"` is an id an earlier step named `name` created. kind is `document`, `sketch`, `feature`, `body`, `component`, `mate`, `drawing`, `plane` or `entity`; add `[n]` for the nth. `"@name.result.path"` reads a value from a read-only step's result.
 - **Selectors.** `{"$face": {...}}` or `{"$edge": {...}}` picks one; `{"$faces": {...}}` or `{"$edges": {...}}` picks every match.

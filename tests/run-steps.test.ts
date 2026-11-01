@@ -99,9 +99,12 @@ test("run_steps: an ambiguous pick fails with a clear message and the whole batc
   const after = await store.read(id);
   assert.equal(after.features.length, before.features.length);
   assert.equal(after.sketches.length, before.sketches.length);
-  // Unknown tools and history tools are refused.
-  const bad = await run("run_steps", { steps: [{ tool: "undo", args: {} }] }, id);
-  assert.match(bad.error, /cannot run in a batch/);
+  // Lifecycle effects cannot be rolled back with a geometry transaction.
+  for (const command of [{tool:"undo",args:{}},{tool:"manage_editors",args:{action:"close_others",documentId:id}}]) {
+    const bad = await run("run_steps", { steps: [command] }, id);
+    assert.match(bad.error, /cannot run in a batch/);
+    assert.equal((await store.read(id)).revision, after.revision);
+  }
 });
 
 test("run_steps: a part and an assembly built together; appearance, suppression, interference and definition", async () => {

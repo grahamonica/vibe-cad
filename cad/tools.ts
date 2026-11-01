@@ -4738,8 +4738,8 @@ export function toolset(store: Store) {
   );
   // ---------------------------------------------------------------------------
   // run_steps: many typed tool calls in one request, for building fast.
-  /** Tools a batch cannot run: itself, history and preview flows, and git. */
-  const notInBatch = (name: string) => name === "run_steps" || ["control_build", "compact_storage", "undo", "redo", "restore_history", "preview_feature", "apply_preview", "dismiss_preview"].includes(name) || name.startsWith("git_");
+  /** Lifecycle commands are standalone: their external effects cannot be rolled back with CAD. */
+  const notInBatch = (name: string) => name === "run_steps" || ["manage_editors", "control_build", "compact_storage", "undo", "redo", "restore_history", "preview_feature", "apply_preview", "dismiss_preview"].includes(name) || name.startsWith("git_");
   const kinds = { document: "", sketch: "sketches", feature: "features", body: "bodies", component: "components", mate: "mates", drawing: "drawings", plane: "referencePlanes", entity: "" } as const;
   type Kind = keyof typeof kinds;
   /** What a step made: ids of new objects of each kind, found by comparing the document before and after. */
