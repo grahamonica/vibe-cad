@@ -5,7 +5,7 @@ description: How to build, edit and check parametric CAD in Vibe CAD (parts, ass
 
 # Using Vibe CAD
 
-Vibe CAD is parametric CAD. Every tool edits the same saved model the user sees in the editor: sketches, a feature history, assemblies with mates, and drawings.
+Vibe CAD is parametric CAD. Document-editing tools operate on the same saved model the user sees in the editor: sketches, a feature history, assemblies with mates, and drawings.
 
 Use the installed local `vibe-cad` connection (`mcp__vibe_cad__*`). The former **Vibe CAD Development Test** app is retired. Do not call its cached `vibe_cad_development_test` tools or reopen its old viewer cards; they point to a removed service and can report “Session terminated.” Create or open a document through the local connection to display a fresh editor. If the current conversation lacks a required local tool, do not substitute the retired development app.
 
@@ -15,8 +15,8 @@ Use the installed local `vibe-cad` connection (`mcp__vibe_cad__*`). The former *
 - **Units.** All tools use millimeters and degrees, whatever the editor shows.
 - **Revisions.** Edit tools take `documentId` and `expectedRevision`, the latest revision. An edit made from a stale revision is refused. A failed edit leaves the model unchanged.
 - **Geometry references.** Faces and edges are ids taken from the model, through `inspect_document`, `inspect_geometry` or `inspect_selection` (what the user has selected). Never invent an id. In `run_steps`, pick geometry by description instead.
-- **Large imported parts.** `inspect_geometry` returns 200 references per page. Use `kind`, exact `geomType`, and `minimumArea` filters, or follow `topologyPage.nextOffset` for more. Geometry retains its full detail; a reference page covers only part of it.
-- **Results.** Results are compact summaries. Each one carries `warnings` and a `definition` block: `status` is `full`, `under` or `over`, and `notes` lists what is under-defined and any mate conflicts.
+- **Large imported parts.** `inspect_geometry` returns 200 references per page by default; `limit` accepts 1–500. Use `kind`, exact `geomType`, and `minimumArea` filters, or follow `topologyPage.nextOffset` for more. Geometry retains its full detail; a reference page covers only part of it.
+- **Results.** Model-view results are compact summaries with `warnings` and a `definition` block: `status` is `full`, `under` or `over`, and `notes` lists what is under-defined and any mate conflicts. Specialized responses (including lifecycle, schema, file and camera/selection acknowledgements) and read-only batches need not include these fields; use `check_definition` when you need a definition assessment.
 
 ## Show the interactive editor in chat
 
@@ -60,9 +60,9 @@ Use direct assembly dragging for live motion, or Evaluate > Motion for play/paus
 
 Before fabricating detailed sheet artwork, run `check_sheet_features` for each cut body with the supplier's minimum web and cut-gap widths. Evaluate > Minimum Features exposes the same explicit check. It uses bounded sampling of cached edges, reports approximate widths, actual edge references, disconnected material regions and uncertainty, and never edits the part. Its no-narrow-features result is a screening result, not a certified global minimum or supplier approval. Review reported slivers, narrow necks and gaps; do not automatically erase meaningful details. Use smooth arcs with bounded fitting error for narrow artwork: unconstrained interpolating splines can overshoot and create fragile slivers or detached islands. Keep dimensioned tabs, slots and mounting geometry separate. Native kernel validation already rejects zero-volume and invalid native feature results; imported or unsupported geometry requires separate review.
 
-Use `run_steps` for any sequence of operations: one request instead of many calls or screenshots.
+Use `run_steps` for a sequence of supported CAD operations: one request instead of many calls or screenshots.
 
-The model's direct tool list intentionally contains the main document, editor, sketch, build, inspection and export tools. The editor has every typed operation. For specialist operations listed below, request their exact schemas with `get_tool_schema`, then use their names and validated arguments in `run_steps`. An operation absent from the direct list is still usable through the batch. Never fall back to a shell or the retired development app.
+The model's direct tool list intentionally contains the main document, editor, sketch, build, inspection and export tools. The editor has every typed operation. For specialist operations listed below, request their exact schemas with `get_tool_schema`, then use their names and validated arguments in `run_steps`. A specialist CAD operation absent from the direct list is still usable through the batch, except for the standalone command categories below. Never fall back to a shell or the retired development app.
 
 - **Steps.** Each step is `{ "tool", "args", "as" }`. Editor lifecycle, build control, storage cleanup, history, preview and git commands run separately.
 - **Filled in for you.** Each step gets `documentId` and `expectedRevision` automatically. Give `documentId` (such as `"@bracket.document"`) to work on another document.
@@ -70,8 +70,8 @@ The model's direct tool list intentionally contains the main document, editor, s
 - **Selectors.** `{"$face": {...}}` or `{"$edge": {...}}` picks one; `{"$faces": {...}}` or `{"$edges": {...}}` picks every match.
   - Filters: `body`, `component`, `feature`, `type` (plane, cylinder, line, circle, …), `normal`, `along`, `radius`, `hole`.
   - Choose one of several with `near`, `extreme` (farthest along a direction) or `largest`.
-  - A selector that matches more than one item fails; it never guesses.
-- **Rollback.** If a step fails, the documents it changed go back to how they were (`atomic`, on by default).
+  - A single selector that matches distinct ambiguous surfaces fails. Equivalent pieces of one surface (such as cylinder halves) count as one, and the largest piece is selected. Plural selectors return all matches.
+- **Rollback.** An ordinary step failure attempts to restore previously existing documents changed by the batch (`atomic`, on by default). New documents remain and are listed in `createdDocuments`; Stop/cancellation preserves committed steps. Check `rolledBack` and `rollbackErrors` and inspect current revisions if recovery is incomplete. With `atomic: false`, completed steps remain saved.
 
 ```json
 {"steps": [
@@ -101,7 +101,7 @@ Use `capture_view` to inspect geometry or provide a static image. Keep the inter
 - **Features:** `extrude`, `revolve`, `sweep`, `loft`, `create_hole`, `fillet_edges`, `chamfer_edges`, `shell_body`, `draft_faces`, `create_rib`, `create_linear_pattern`, `create_circular_pattern`, `mirror_body`, `boolean_bodies`, `split_body`, `move_face`, `create_thread`, `create_gear`, `create_pulley`, `create_reference_plane`.
 - **Sheet metal:** `create_base_flange`, `create_edge_flange`, `create_hem`, `create_sketched_bend`, `create_closed_corner`, `flat_pattern`.
 - **Weldments:** `create_structural_member`, `create_weld_bead`, `cut_list`.
-- **Files:** `import_vendor_part` (direct HTTPS STEP/STL URL), `import_part` (supplied base64 bytes as a new part), `import_step`, `import_stl`, `export_file`, `export_face_dxf`.
+- **Files:** `import_vendor_part` (direct HTTPS STEP/STL URL), `import_part` (an authorized localPath or supplied base64 bytes as a new part), `import_step`, `import_stl`, `export_file`, `export_face_dxf`.
 - **Assembly:**
   - Placing parts: `insert_component`, `add_mate` (including gear mates), `edit_mate`, `set_component_transform`, `set_component_grounded`, `pattern_component`.
   - Generated parts: `create_belt`, `create_hole_series`.
@@ -128,6 +128,6 @@ Use `capture_view` to inspect geometry or provide a static image. Keep the inter
 
 ## Recommendation
 
-When an assembly uses off-the-shelf parts (motors, bearings, wheels, fasteners, batteries, electronics), first check whether the manufacturer or a supplier offers an accessible STEP or STL file. Import a direct public HTTPS file URL with `import_vendor_part`, then `insert_component`. The plugin downloads and transfers the original file; do not generate base64 in the conversation or put a URL into a bytes parameter. For an authorized local or prepared STEP/STL file, use `import_part` with `localPath` (absolute path, up to32MiB) and omit `data`; preserve source attribution with `sourceUrl`. Do not encode large CAD files into chat/tool arguments. `import_part` also accepts actual supplied bytes. Design an explicitly labeled dimensional envelope only when no file is readily available; an envelope is not vendor CAD.
+When an assembly uses off-the-shelf parts (motors, bearings, wheels, fasteners, batteries, electronics), first check whether the manufacturer or a supplier offers an accessible STEP or STL file. Import a direct public HTTPS file URL with `import_vendor_part`, then `insert_component`. The plugin downloads and transfers the original file; do not generate base64 in the conversation or put a URL into a bytes parameter. For an authorized local or prepared STEP/STL file, use `import_part` with `localPath` (absolute path, up to 32 MiB) and omit `data`; preserve source attribution with `sourceUrl`. Do not encode large CAD files into chat/tool arguments. `import_part` also accepts actual supplied bytes. Design an explicitly labeled dimensional envelope only when no file is readily available; an envelope is not vendor CAD.
 
 Inspect imported shaft/bore diameters, mounting holes and faces before selecting interfaces. Similar outside dimensions do not prove that two vendors' wheel/hub systems fit. Ground a stable chassis reference and use actual geometry with `add_mate` for mechanically related components; fixed placements alone are not a verified mechanical connection. `auto_explode` can separate grounded components visually without changing assembled positions, grounding, mates, measurements or exports.

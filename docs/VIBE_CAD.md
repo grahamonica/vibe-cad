@@ -48,7 +48,7 @@ Converted edges follow the model: every rebuild re-projects them, re-solves the 
 
 ## Part features
 
-All features build real OpenCascade B-rep solids, and every result passes a B-rep validity check before it is saved.
+Solid-generating features build real OpenCascade B-rep solids and validate the resulting geometry before saving. Reference features and cosmetic threads do not add new solids.
 
 - **Extrude and cut:** blind, symmetric, two-sided, through all, through all in both directions and up to face, with an optional draft angle.
 - **Revolve, sweep and loft:** revolve about a sketch line, edge, face axis or principal axis; sweep along a path; loft between profiles.
@@ -104,7 +104,7 @@ When an edit makes a reference ambiguous (for example, a later cut splits a refe
 - **Inserted parts:** insert another document as a component, as many times as needed. Instances follow every later edit of the part document; an assembly can contain sub-assemblies. Circular inserts are rejected.
 - **Grouped bodies:** bodies of the current document can also be grouped into components.
 - **Component patterns:** repeat an inserted part along a direction or about an axis, such as bolts around a bolt circle. The axis or direction can be an edge or cylindrical face, or X, Y or Z. Instances follow the source component as it moves or is re-mated, count in the BOM, and can be mate targets.
-- **Mates:** coincident, distance, parallel, perpendicular, angle, concentric (circular edges or cylindrical faces), tangent (a cylindrical face against a plane) and lock. A new mate keeps the alignment the parts are closest to; Flip reverses it.
+- **Mates:** coincident, distance, parallel, perpendicular, angle, concentric (circular edges or cylindrical faces), tangent (a cylindrical face against a plane) lock, and signed distance/angle travel limits (`limitDistance`, `limitAngle`). Limits bound remaining motion without locating the component on their own. `set_component_motion` declares the intended remaining degrees of freedom; it adds no physical constraint. A new mate keeps the alignment the parts are closest to; Flip reverses it.
   - **Solving:** mates are solved in dependency order. Closed loops of mates (linkages) are solved together by damped least squares from where the parts are: each step is the smallest move that meets the mates, so a linkage keeps its branch and its remaining freedom. Moving a part of a linkage (dragging it, or typing a rotation) keeps that part where it was put and solves the rest of the loop around it, so turning a crank moves a four-bar.
   - **Conflicts, as in SolidWorks:** a mate that over-defines a part is added but flagged and left unsolved. It names the mates it conflicts with, the ones without which it could be met, and the rest of the assembly stays exactly mated. A mate whose face or edge no longer exists (after a part edit) is flagged as broken and never re-attached to other geometry. The Mate dialog warns before a conflicting mate is accepted. The tree shows flagged mates in the error color, and parts as (f) fixed, (-) under-defined, (+) over-defined, or unmarked when fully defined. A part's properties give its remaining degrees of freedom (1 for each link of a four-bar). A part's Position and Rotation show where its mates put it and can be edited; its mates hold what they fix.
 - **Moving parts:** drag components with a gizmo or position them numerically. A mated part moves only along the motion its mates leave free, such as sliding along or turning about a concentric axis.
@@ -143,12 +143,12 @@ Designs in a project folder (`VIBE_WORKSPACE`, usually a git checkout) are versi
 
 ## Assistant tools
 
-The catalog has 136 typed tools with input and output schemas.
+Version 1.2.0 has 146 typed tools with input and output schemas. The direct model catalog exposes 24 core tools; the editor can access all tools. Use `get_tool_schema` to inspect specialist operations before calling them through `run_steps`. Lifecycle, build control, storage cleanup, history, preview and git commands run separately, not in a batch.
 
-- **`run_steps`:** builds in one request. Each step is an ordinary typed tool, checked as that tool checks it. Steps can refer to what earlier steps made (`"@plate.body"`), and can pick faces and edges by description (`{"$face": {"body": "@plate.body", "normal": [0,0,1], "extreme": [0,0,1]}}`). An ambiguous pick fails rather than guess. By default a failed step returns every document the batch changed to where it was.
+- **`run_steps`:** builds in one request. Each step is an ordinary typed tool, checked as that tool checks it. Steps can refer to what earlier steps made (`"@plate.body"`), and can pick faces and edges by description (`{"$face": {"body": "@plate.body", "normal": [0,0,1], "extreme": [0,0,1]}}`). An ambiguous single pick fails rather than guesses; equivalent pieces of one surface are treated as one and the largest piece is selected. With `atomic: true` (the default), an ordinary step failure attempts to restore previously existing documents changed by the batch. Newly created documents are retained and listed in `createdDocuments`. Stop/cancellation preserves committed steps. Check `rolledBack` and any `rollbackErrors`; incomplete recovery requires inspecting current revisions before continuing.
 - **`capture_view`:** returns PNG pictures from named angles or any direction, drawn from the model itself, without screenshots. It can focus or isolate parts, make some see-through, and highlight parts, faces or mates. Mate conflicts are marked in red, with a legend.
-- **Definition in every result:** every result carries the model's definition status and notes. `check_definition` explains each flagged mate: how far it is from met, and what geometry each side refers to.
-- **Model guidance:** the plugin ships a guide for the model (`skills/vibe-cad/SKILL.md`) that documents this interface. It recommends looking for an existing STEP or STL file for off-the-shelf parts before designing them. Every tool shares the editor's revision checks, atomic saves, history and undo. There is no free-form command executor. Geometry-changing tools rebuild and validate before saving; a failed edit leaves the previous committed document unchanged.
+- **Definition status:** model-view summaries and successful batches that change a document carry definition status and notes. Read-only batches and specialized results, such as lifecycle, schema, file and camera/selection acknowledgements, need not carry a definition block. `check_definition` explains each flagged mate: how far it is from met, and what geometry each side refers to.
+- **Model guidance:** the plugin ships a guide for the model (`skills/vibe-cad/SKILL.md`) that documents this interface. It recommends looking for an existing STEP or STL file for off-the-shelf parts before designing them. Document-editing tools share the editor's revision checks, atomic saves, history and undo. Read-only queries and lifecycle, context, storage and git operations have their own response and side-effect rules. There is no free-form command executor. Geometry-changing tools rebuild and validate before saving; a failed edit leaves the previous committed document unchanged.
 
 ## Not yet implemented
 
@@ -157,6 +157,6 @@ The catalog has 136 typed tools with input and output schemas.
 - Sheet metal: round and tear-drop corner reliefs, closed corners at angles other than 90° or on flange ends, miter flanges, jogs, lofted bends, sketched bends across holes or slanted edges, and features added after a sketched bend in the flat pattern. The flat pattern covers flanges on the base outline and on flange ends.
 - Rack-and-pinion and cam mates, helical and bevel gears, chains and sprockets, and belts over more than two pulleys.
 - Curved weldment members, end caps, gussets, and weld symbols other than fillet (groove, plug, spot).
-- Dynamics (forces, speeds and torques in a mechanism), cam mates, and mate limits (angle or distance ranges).
+- Dynamics (forces, speeds and torques in a mechanism) and cam mates.
 - Tolerance stack-up.
 - Editing an imported body's original feature history (STEP and STL files import as solids that later features and Move Face edit), Delete Face, moving non-planar faces, IGES import, curved-surface reconstruction from meshes, FEA/CFD, and live multi-user editing (collaboration happens through git branches and pull requests).
